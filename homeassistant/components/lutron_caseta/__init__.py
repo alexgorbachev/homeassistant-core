@@ -54,6 +54,7 @@ from .device_trigger import (
     LEAP_TO_DEVICE_TYPE_SUBTYPE_MAP,
     LUTRON_BUTTON_TRIGGER_SCHEMA,
 )
+from .estimated_cover import OpenCloseStopManager, parse_estimated_cover_configs
 from .models import (
     LUTRON_BUTTON_LEAP_BUTTON_NUMBER,
     LUTRON_KEYPAD_AREA_NAME,
@@ -215,11 +216,24 @@ async def async_setup_entry(
     # Store this bridge (keyed by entry_id) so it can be retrieved by the
     # platforms we're setting up.
 
-    entry.runtime_data = LutronCasetaData(bridge, bridge_device, keypad_data)
+    open_close_stop_manager = OpenCloseStopManager(
+        hass, bridge, parse_estimated_cover_configs(entry.options)
+    )
+    entry.runtime_data = LutronCasetaData(
+        bridge, bridge_device, keypad_data, open_close_stop_manager
+    )
+    entry.async_on_unload(entry.add_update_listener(_async_reload_entry))
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
     return True
+
+
+async def _async_reload_entry(
+    hass: HomeAssistant, entry: LutronCasetaConfigEntry
+) -> None:
+    """Reload the bridge when estimated-cover options change."""
+    await hass.config_entries.async_reload(entry.entry_id)
 
 
 @callback
@@ -494,8 +508,10 @@ async def async_unload_entry(
 ) -> bool:
     """Unload the bridge from a config entry."""
     data = entry.runtime_data
+    await data.open_close_stop_manager.async_shutdown()
+    unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     await data.bridge.close()
-    return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    return unloaded
 
 
 def _id_to_identifier(lutron_id: str) -> tuple[str, str]:

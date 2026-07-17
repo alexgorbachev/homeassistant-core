@@ -114,6 +114,7 @@ class MockBridge:
         self.battery_statuses = {"802": "Good"}
         self.buttons = self.load_buttons()
         self._subscribers: dict[str, list] = {}
+        self._zone_status_subscribers: list = []
         self._button_subscribers: dict[str, list] = {}
         self.smart_away_state = smart_away_state
         self._smart_away_subscribers = []
@@ -146,6 +147,16 @@ class MockBridge:
             self._subscribers[device_id] = []
         self._subscribers[device_id].append(callback_)
 
+    def add_zone_status_subscriber(self, callback_):
+        """Mock a raw zone-status subscription."""
+        self._zone_status_subscribers.append(callback_)
+
+        def remove() -> None:
+            if callback_ in self._zone_status_subscribers:
+                self._zone_status_subscribers.remove(callback_)
+
+        return remove
+
     def add_smart_away_subscriber(self, callback_):
         """Add a smart away subscriber."""
         self._smart_away_subscribers.append(callback_)
@@ -165,9 +176,20 @@ class MockBridge:
             for callback in self._subscribers[device_id]:
                 callback()
 
+    def call_zone_status_subscribers(self, event) -> None:
+        """Deliver one raw zone status event."""
+        for callback in self._zone_status_subscribers:
+            callback(event)
+
     def get_device_by_id(self, device_id: str):
         """Get a device by its ID."""
         return self.devices.get(device_id)
+
+    def get_device_by_zone_id(self, zone_id: str):
+        """Get a device by its zone ID."""
+        return next(
+            device for device in self.devices.values() if device.get("zone") == zone_id
+        )
 
     def is_connected(self):
         """Return whether the mock bridge is connected."""
@@ -477,9 +499,9 @@ class MockBridgeWithColorLight(MockBridge):
         return devices
 
 
-def make_mock_entry() -> MockConfigEntry:
+def make_mock_entry(options: dict[str, Any] | None = None) -> MockConfigEntry:
     """Create a mock config entry."""
-    return MockConfigEntry(domain=DOMAIN, data=ENTRY_MOCK_DATA)
+    return MockConfigEntry(domain=DOMAIN, data=ENTRY_MOCK_DATA, options=options or {})
 
 
 async def async_setup_integration(
@@ -490,10 +512,11 @@ async def async_setup_integration(
     timeout_during_connect: bool = False,
     timeout_during_configure: bool = False,
     smart_away_state: str = "",
+    options: dict[str, Any] | None = None,
 ) -> MockConfigEntry:
     """Set up a mock bridge."""
     if config_entry_id is None:
-        mock_entry = make_mock_entry()
+        mock_entry = make_mock_entry(options)
         mock_entry.add_to_hass(hass)
         config_entry_id = mock_entry.entry_id
     else:

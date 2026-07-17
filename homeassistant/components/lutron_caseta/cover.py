@@ -1,6 +1,7 @@
 """Support for Lutron Caseta shades."""
 
 from enum import Enum
+from functools import partial
 from typing import Any, override
 
 from homeassistant.components.cover import (
@@ -15,7 +16,9 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from .const import DEVICE_TYPE_OPEN_CLOSE_STOP
+from .cover_estimator import OpenCloseStopEstimator
 from .entity import LutronCasetaEntity, LutronCasetaUpdatableEntity
+from .estimated_cover import EstimatedCoverConfig
 from .models import LutronCasetaConfigEntry
 
 
@@ -50,6 +53,97 @@ class LutronCasetaOpenCloseStopCover(LutronCasetaEntity, CoverEntity):
     async def async_stop_cover(self, **kwargs: Any) -> None:
         """Stop the cover."""
         await self._smartbridge.stop_cover(self.device_id)
+
+
+class LutronCasetaEstimatedOpenCloseStopCover(LutronCasetaEntity, CoverEntity):
+    """Representation of a calibrated cover with an estimated position."""
+
+    _attr_assumed_state = True
+    _attr_supported_features = (
+        CoverEntityFeature.OPEN
+        | CoverEntityFeature.CLOSE
+        | CoverEntityFeature.STOP
+        | CoverEntityFeature.SET_POSITION
+    )
+
+    def __init__(self, device, data, config: EstimatedCoverConfig) -> None:
+        """Initialize the entity and its timing engine."""
+        super().__init__(device, data)
+        self._attr_device_class = config.device_class
+        self._manager = data.open_close_stop_manager
+        self._zone_id = config.zone_id
+        self._remove_engine = None
+        self._engine = OpenCloseStopEstimator(
+            config.travel_times,
+            partial(self._smartbridge.raise_cover, self.device_id),
+            partial(self._smartbridge.lower_cover, self.device_id),
+            partial(self._smartbridge.stop_cover, self.device_id),
+            self._handle_estimator_update,
+        )
+
+    @property
+    @override
+    def current_cover_position(self) -> int | None:
+        """Return the estimated position when synchronized."""
+        return self._engine.snapshot.position
+
+    @property
+    @override
+    def is_closed(self) -> bool | None:
+        """Return whether the estimated position is fully closed."""
+        if (position := self.current_cover_position) is None:
+            return None
+        return position == 0
+
+    @property
+    @override
+    def is_opening(self) -> bool:
+        """Return whether the estimator is moving open."""
+        return self._engine.snapshot.is_opening
+
+    @property
+    @override
+    def is_closing(self) -> bool:
+        """Return whether the estimator is moving closed."""
+        return self._engine.snapshot.is_closing
+
+    @override
+    # pylint: disable-next=home-assistant-missing-super-call
+    async def async_added_to_hass(self) -> None:
+        """Register this engine with the integration event router."""
+        self._remove_engine = self._manager.register_engine(self._zone_id, self._engine)
+
+    @override
+    async def async_will_remove_from_hass(self) -> None:
+        """Stop active timing and unregister event routing."""
+        if self._remove_engine is not None:
+            self._remove_engine()
+            self._remove_engine = None
+        await self._engine.async_shutdown()
+
+    @override
+    async def async_close_cover(self, **kwargs: Any) -> None:
+        """Close and synchronize at the lower endpoint."""
+        await self._engine.async_move_to(0)
+
+    @override
+    async def async_open_cover(self, **kwargs: Any) -> None:
+        """Open and synchronize at the upper endpoint."""
+        await self._engine.async_move_to(100)
+
+    @override
+    async def async_stop_cover(self, **kwargs: Any) -> None:
+        """Stop and retain a position only when motion was synchronized."""
+        await self._engine.async_stop()
+
+    @override
+    async def async_set_cover_position(self, **kwargs: Any) -> None:
+        """Move to an estimated percentage, synchronizing first if needed."""
+        await self._engine.async_move_to(kwargs[ATTR_POSITION])
+
+    def _handle_estimator_update(self) -> None:
+        """Publish a timing-engine state change."""
+        self.async_write_ha_state()
 
 
 class LutronCasetaShade(LutronCasetaUpdatableEntity, CoverEntity):
@@ -206,11 +300,22 @@ async def async_setup_entry(
     data = config_entry.runtime_data
     bridge = data.bridge
     cover_devices = bridge.get_devices_by_domain(COVER_DOMAIN)
-    async_add_entities(
-        # default to standard LutronCasetaCover type if the
-        # pylutron type is not yet mapped
-        PYLUTRON_TYPE_TO_CLASSES.get(cover_device["type"], LutronCasetaShade)(
-            cover_device, data
+    entities: list[LutronCasetaEntity] = []
+    for cover_device in cover_devices:
+        if cover_device["type"] == DEVICE_TYPE_OPEN_CLOSE_STOP and (
+            config := data.open_close_stop_manager.config_for_zone(
+                cover_device.get("zone")
+            )
+        ):
+            entities.append(
+                LutronCasetaEstimatedOpenCloseStopCover(cover_device, data, config)
+            )
+            continue
+
+        # Default to the standard shade entity when pylutron adds a new type.
+        entity_class = PYLUTRON_TYPE_TO_CLASSES.get(
+            cover_device["type"], LutronCasetaShade
         )
-        for cover_device in cover_devices
-    )
+        entities.append(entity_class(cover_device, data))
+
+    async_add_entities(entities)
