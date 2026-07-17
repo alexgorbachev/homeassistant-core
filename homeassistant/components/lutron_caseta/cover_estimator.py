@@ -52,6 +52,9 @@ class EstimatorSnapshot:
     state: EstimatorState
     position: int | None
     target: int | None
+    generation: int
+    last_source: str | None
+    desynchronization_reason: str | None
 
     @property
     def is_opening(self) -> bool:
@@ -101,6 +104,8 @@ class OpenCloseStopEstimator:
         self._generation = 0
         self._pending_zone_event: asyncio.Task[None] | None = None
         self._expected_zone_events: list[_ExpectedZoneEvent] = []
+        self._last_source: str | None = None
+        self._desynchronization_reason: str | None = "startup"
 
     @property
     def snapshot(self) -> EstimatorSnapshot:
@@ -108,12 +113,20 @@ class OpenCloseStopEstimator:
         position = None
         if self._position is not None:
             position = round(min(100.0, max(0.0, self._position)))
-        return EstimatorSnapshot(self._state, position, self._target)
+        return EstimatorSnapshot(
+            self._state,
+            position,
+            self._target,
+            self._generation,
+            self._last_source,
+            self._desynchronization_reason,
+        )
 
     async def async_move_to(self, target: int) -> None:
         """Start a Home Assistant movement and return after its first command."""
         if not 0 <= target <= 100:
             raise ValueError("target must be between 0 and 100")
+        self._last_source = "home_assistant"
 
         try:
             interrupted = await self._async_cancel_motion(send_stop=True)
@@ -135,20 +148,22 @@ class OpenCloseStopEstimator:
                 await self._stop_cover()
             except Exception:
                 _LOGGER.exception("Failed to stop canceled OpenCloseStop movement")
-            self._set_unknown()
+            self._set_unknown("canceled_command")
             raise
 
     async def async_stop(self) -> None:
         """Stop motion and retain position only when its starting point was known."""
+        self._last_source = "home_assistant"
         await self._async_cancel_motion(send_stop=False)
         await self._stop_cover()
         if self._position is None:
-            self._set_unknown()
+            self._set_unknown("stopped_while_unknown")
         else:
             self._set_idle_known(self._position)
 
     async def async_external_action(self, action: ExternalAction) -> None:
         """Track a mapped Pico action without sending a duplicate command."""
+        self._last_source = "pico"
         zone_event_arrived_first = False
         if action is not ExternalAction.STOP:
             zone_event_arrived_first = await self._async_cancel_pending_zone_event()
@@ -156,7 +171,7 @@ class OpenCloseStopEstimator:
 
         if action is ExternalAction.STOP:
             if self._position is None:
-                self._set_unknown()
+                self._set_unknown("pico_stop_while_unknown")
             else:
                 self._set_idle_known(self._position)
             return
@@ -170,7 +185,7 @@ class OpenCloseStopEstimator:
     async def async_handle_zone_update(self, *, initial: bool) -> None:
         """Correlate a raw zone event or invalidate on an unexplained update."""
         if initial:
-            await self.async_invalidate()
+            await self.async_invalidate("initial_snapshot")
             return
 
         now = self._monotonic()
@@ -184,12 +199,30 @@ class OpenCloseStopEstimator:
         await self._async_cancel_pending_zone_event()
         self._pending_zone_event = asyncio.create_task(self._async_expire_zone_event())
 
-    async def async_invalidate(self) -> None:
+    async def async_invalidate(self, reason: str = "unexpected_zone_event") -> None:
         """Forget position after reconnect or an unexplained controller action."""
         await self._async_cancel_pending_zone_event()
         await self._async_cancel_task()
         self._expected_zone_events.clear()
-        self._set_unknown()
+        self._set_unknown(reason)
+
+    async def async_suspend_for_setup(self) -> None:
+        """Stop active movement and invalidate position before guided setup."""
+        self._last_source = "setup"
+        await self._async_cancel_pending_zone_event()
+        was_active = self._task is not None or self._state in (
+            EstimatorState.OPENING,
+            EstimatorState.CLOSING,
+            EstimatorState.ENDPOINT_GUARD,
+        )
+        self._settle_motion()
+        await self._async_cancel_task()
+        self._expected_zone_events.clear()
+        try:
+            if was_active:
+                await self._stop_cover()
+        finally:
+            self._set_unknown("setup_started")
 
     async def async_shutdown(self) -> None:
         """Cancel timers and stop a cover that may still be moving."""
@@ -206,7 +239,7 @@ class OpenCloseStopEstimator:
                 await self._stop_cover()
             except Exception:
                 _LOGGER.exception("Failed to stop OpenCloseStop cover during shutdown")
-        self._set_unknown()
+        self._set_unknown("shutdown")
 
     async def _async_start_unknown_move(
         self, target: int, *, already_stopped: bool
@@ -340,7 +373,7 @@ class OpenCloseStopEstimator:
         except Exception:
             if token in self._expected_zone_events:
                 self._expected_zone_events.remove(token)
-            self._set_unknown()
+            self._set_unknown("command_failure")
             raise
 
     def _begin_motion(self, target: int) -> None:
@@ -383,11 +416,11 @@ class OpenCloseStopEstimator:
             try:
                 await self._stop_cover()
             except Exception:
-                self._set_unknown()
+                self._set_unknown("stop_failure")
                 raise
         if active:
             if self._position is None:
-                self._set_unknown()
+                self._set_unknown("interrupted_while_unknown")
             else:
                 self._set_idle_known(self._position)
         return active and send_stop
@@ -418,7 +451,7 @@ class OpenCloseStopEstimator:
             raise
         except Exception:
             _LOGGER.exception("OpenCloseStop cover movement failed")
-            self._set_unknown()
+            self._set_unknown("background_command_failure")
         finally:
             if self._task is task and generation == self._generation:
                 self._task = None
@@ -429,7 +462,7 @@ class OpenCloseStopEstimator:
             await self._sleep(ZONE_EVENT_GRACE_SECONDS)
             await self._async_cancel_task()
             self._expected_zone_events.clear()
-            self._set_unknown()
+            self._set_unknown("unexpected_zone_event")
         finally:
             if self._pending_zone_event is task:
                 self._pending_zone_event = None
@@ -496,13 +529,16 @@ class OpenCloseStopEstimator:
         self._target = None
         self._clear_motion()
         self._state = EstimatorState.IDLE_KNOWN
+        self._desynchronization_reason = None
         self._notify()
 
-    def _set_unknown(self) -> None:
+    def _set_unknown(self, reason: str | None = None) -> None:
         self._position = None
         self._target = None
         self._clear_motion()
         self._state = EstimatorState.UNKNOWN
+        if reason is not None:
+            self._desynchronization_reason = reason
         self._notify()
 
     def _notify(self) -> None:

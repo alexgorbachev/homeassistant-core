@@ -3,7 +3,9 @@
 import asyncio
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from functools import partial
 import logging
+import time
 from typing import Any
 
 from pylutron_caseta.smartbridge import (
@@ -15,24 +17,40 @@ from pylutron_caseta.smartbridge import (
 from homeassistant.components.cover import CoverDeviceClass
 from homeassistant.const import CONF_DEVICE_CLASS, CONF_EFFECT
 from homeassistant.core import Event, HomeAssistant, callback
+from homeassistant.exceptions import HomeAssistantError
 
 from .const import (
+    ACTION_LONG_PRESS,
+    ACTION_MULTITAP,
     ACTION_PRESS,
+    ACTION_RELEASE,
     ATTR_ACTION,
     ATTR_BUTTON_TYPE,
     ATTR_LEAP_BUTTON_NUMBER,
     ATTR_SERIAL,
+    CALIBRATION_SOURCE_GUIDED_HA,
+    CALIBRATION_SOURCE_GUIDED_PICO,
+    CALIBRATION_SOURCE_MANUAL,
     CONF_BINDINGS,
+    CONF_CALIBRATION,
+    CONF_CALIBRATION_SOURCE,
     CONF_CLOSE_GUARD_SECONDS,
+    CONF_CLOSE_SAMPLES,
     CONF_CLOSE_TRAVEL_SECONDS,
     CONF_ESTIMATED_COVERS,
     CONF_GESTURE,
     CONF_KEYPAD_SERIAL,
     CONF_OPEN_GUARD_SECONDS,
+    CONF_OPEN_SAMPLES,
     CONF_OPEN_TRAVEL_SECONDS,
     LUTRON_CASETA_BUTTON_EVENT,
 )
 from .cover_estimator import ExternalAction, OpenCloseStopEstimator, TravelTimes
+from .cover_setup import (
+    OpenCloseStopSetupSession,
+    SetupButtonEvent,
+    SetupSessionBusyError,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -43,6 +61,16 @@ SUPPORTED_DEVICE_CLASSES = (
     CoverDeviceClass.BLIND,
     CoverDeviceClass.CURTAIN,
     CoverDeviceClass.SHADE,
+)
+SUPPORTED_GESTURES = frozenset(
+    {ACTION_PRESS, ACTION_RELEASE, ACTION_MULTITAP, ACTION_LONG_PRESS}
+)
+SUPPORTED_CALIBRATION_SOURCES = frozenset(
+    {
+        CALIBRATION_SOURCE_GUIDED_HA,
+        CALIBRATION_SOURCE_GUIDED_PICO,
+        CALIBRATION_SOURCE_MANUAL,
+    }
 )
 
 
@@ -73,6 +101,23 @@ class PicoBinding:
 
 
 @dataclass(frozen=True, slots=True)
+class CalibrationMetadata:
+    """Describe how travel timing was established."""
+
+    source: str
+    open_samples: tuple[float, ...] = ()
+    close_samples: tuple[float, ...] = ()
+
+    def as_dict(self) -> dict[str, Any]:
+        """Serialize calibration provenance into config-entry options."""
+        return {
+            CONF_CALIBRATION_SOURCE: self.source,
+            CONF_OPEN_SAMPLES: list(self.open_samples),
+            CONF_CLOSE_SAMPLES: list(self.close_samples),
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class EstimatedCoverConfig:
     """Validated configuration for one estimated cover."""
 
@@ -80,10 +125,11 @@ class EstimatedCoverConfig:
     device_class: CoverDeviceClass
     travel_times: TravelTimes
     bindings: tuple[PicoBinding, ...]
+    calibration: CalibrationMetadata | None = None
 
     def as_dict(self) -> dict[str, Any]:
         """Serialize this cover into config-entry options."""
-        return {
+        result = {
             CONF_DEVICE_CLASS: self.device_class,
             CONF_OPEN_TRAVEL_SECONDS: self.travel_times.open_seconds,
             CONF_CLOSE_TRAVEL_SECONDS: self.travel_times.close_seconds,
@@ -91,6 +137,9 @@ class EstimatedCoverConfig:
             CONF_CLOSE_GUARD_SECONDS: self.travel_times.close_guard_seconds,
             CONF_BINDINGS: [binding.as_dict() for binding in self.bindings],
         }
+        if self.calibration is not None:
+            result[CONF_CALIBRATION] = self.calibration.as_dict()
+        return result
 
 
 def standard_pico_bindings(serials: list[str]) -> tuple[PicoBinding, ...]:
@@ -194,11 +243,34 @@ def _parse_cover_config(zone_id: str, raw_config: Any) -> EstimatedCoverConfig:
     if len({binding.event_key for binding in bindings}) != len(bindings):
         raise ValueError("bindings contain duplicate Pico actions")
 
+    calibration = None
+    if (raw_calibration := raw_config.get(CONF_CALIBRATION)) is not None:
+        if not isinstance(raw_calibration, Mapping):
+            raise TypeError("calibration metadata must be a mapping")
+        source = raw_calibration[CONF_CALIBRATION_SOURCE]
+        if not isinstance(source, str):
+            raise TypeError("calibration source must be a string")
+        if source not in SUPPORTED_CALIBRATION_SOURCES:
+            raise ValueError(f"unsupported calibration source {source}")
+        open_samples = _parse_samples(raw_calibration.get(CONF_OPEN_SAMPLES, []))
+        close_samples = _parse_samples(raw_calibration.get(CONF_CLOSE_SAMPLES, []))
+        if source == CALIBRATION_SOURCE_MANUAL:
+            if open_samples or close_samples:
+                raise ValueError("manual calibration cannot contain samples")
+        elif len(open_samples) not in (2, 3) or len(close_samples) not in (2, 3):
+            raise ValueError("guided calibration requires two or three samples")
+        calibration = CalibrationMetadata(
+            source,
+            open_samples,
+            close_samples,
+        )
+
     return EstimatedCoverConfig(
         zone_id,
         device_class,
         TravelTimes(open_seconds, close_seconds, open_guard, close_guard),
         bindings,
+        calibration,
     )
 
 
@@ -213,6 +285,8 @@ def _parse_binding(raw_binding: Any) -> PicoBinding:
     gesture = raw_binding[CONF_GESTURE]
     if not isinstance(button_type, str) or not isinstance(gesture, str):
         raise TypeError("button type and gesture must be strings")
+    if gesture not in SUPPORTED_GESTURES:
+        raise ValueError(f"unsupported gesture {gesture}")
     return PicoBinding(
         serial,
         button_number,
@@ -233,6 +307,20 @@ def _validated_number(
     return result
 
 
+def _parse_samples(raw_samples: Any) -> tuple[float, ...]:
+    if not isinstance(raw_samples, list):
+        raise TypeError("calibration samples must be a list")
+    return tuple(
+        _validated_number(
+            sample,
+            "calibration sample",
+            minimum=MIN_TRAVEL_SECONDS,
+            maximum=MAX_TRAVEL_SECONDS,
+        )
+        for sample in raw_samples
+    )
+
+
 class OpenCloseStopManager:
     """Route controller and Pico events to configured cover estimators."""
 
@@ -244,6 +332,7 @@ class OpenCloseStopManager:
     ) -> None:
         """Subscribe once for the integration and index all configured bindings."""
         self._hass = hass
+        self._bridge = bridge
         self._configs = configs
         self._engines: dict[str, OpenCloseStopEstimator] = {}
         self._binding_routes = {
@@ -257,6 +346,7 @@ class OpenCloseStopManager:
         self._remove_zone_listener = bridge.add_zone_status_subscriber(
             self._handle_zone_event
         )
+        self._setup_session: OpenCloseStopSetupSession | None = None
         self._closed = False
 
     def config_for_zone(self, zone_id: str | None) -> EstimatedCoverConfig | None:
@@ -277,9 +367,108 @@ class OpenCloseStopManager:
 
         return remove
 
+    async def async_begin_setup(self, zone_id: str) -> OpenCloseStopSetupSession:
+        """Exclusively suspend one cover and return its setup session."""
+        if self._closed:
+            raise SetupSessionBusyError("integration is shutting down")
+        if self._setup_session is not None:
+            raise SetupSessionBusyError("another cover setup is already active")
+        device = self._bridge.get_device_by_zone_id(zone_id)
+        session = OpenCloseStopSetupSession(
+            zone_id,
+            partial(self._bridge.raise_cover, device["device_id"]),
+            partial(self._bridge.lower_cover, device["device_id"]),
+            partial(self._bridge.stop_cover, device["device_id"]),
+        )
+        self._setup_session = session
+        try:
+            if (engine := self._engines.get(zone_id)) is not None:
+                await engine.async_suspend_for_setup()
+        except Exception:
+            self._setup_session = None
+            await session.async_cancel()
+            raise
+        return session
+
+    async def async_end_setup(self, session: OpenCloseStopSetupSession) -> None:
+        """Stop and release the supplied setup session if it is still active."""
+        if self._setup_session is not session:
+            return
+        try:
+            await session.async_cancel()
+        finally:
+            if self._setup_session is session:
+                self._setup_session = None
+
+    def ensure_commands_allowed(self, zone_id: str) -> None:
+        """Reject normal cover commands while guided setup owns the zone."""
+        if self._setup_session is not None and self._setup_session.zone_id == zone_id:
+            raise HomeAssistantError(
+                "OpenCloseStop cover setup is in progress; finish or cancel it first"
+            )
+
+    def diagnostics(self) -> dict[str, Any]:
+        """Return non-sensitive estimator and setup state."""
+        return {
+            "covers": {
+                zone_id: {
+                    "device_class": config.device_class,
+                    "travel_times": {
+                        "open_seconds": config.travel_times.open_seconds,
+                        "close_seconds": config.travel_times.close_seconds,
+                        "open_guard_seconds": config.travel_times.open_guard_seconds,
+                        "close_guard_seconds": config.travel_times.close_guard_seconds,
+                    },
+                    "bindings": [
+                        {
+                            "serial": binding.keypad_serial,
+                            "button": binding.leap_button_number,
+                            "gesture": binding.gesture,
+                            "effect": binding.effect,
+                        }
+                        for binding in config.bindings
+                    ],
+                    "calibration": (
+                        config.calibration.as_dict()
+                        if config.calibration is not None
+                        else None
+                    ),
+                    "estimator": (
+                        {
+                            "state": snapshot.state,
+                            "position": snapshot.position,
+                            "target": snapshot.target,
+                            "generation": snapshot.generation,
+                            "last_source": snapshot.last_source,
+                            "desynchronization_reason": snapshot.desynchronization_reason,
+                        }
+                        if (engine := self._engines.get(zone_id)) is not None
+                        and (snapshot := engine.snapshot)
+                        else None
+                    ),
+                }
+                for zone_id, config in self._configs.items()
+            },
+            "setup_session": (
+                self._setup_session.diagnostics
+                if self._setup_session is not None
+                else None
+            ),
+        }
+
     @callback
     def _handle_zone_event(self, event: ZoneStatusEvent) -> None:
-        if self._closed or (engine := self._engines.get(event.zone_id)) is None:
+        if self._closed:
+            return
+        if (
+            self._setup_session is not None
+            and self._setup_session.zone_id == event.zone_id
+        ):
+            self._setup_session.receive_zone_update(
+                initial=event.origin is ZoneStatusEventOrigin.INITIAL
+            )
+            return
+        if (engine := self._engines.get(event.zone_id)) is None:
             return
         self._hass.async_create_task(
             engine.async_handle_zone_update(
@@ -299,9 +488,19 @@ class OpenCloseStopManager:
         if not isinstance(action, str):
             return
         key = (str(data.get(ATTR_SERIAL)), button_number, action)
+        if self._setup_session is not None:
+            button_type = data.get(ATTR_BUTTON_TYPE)
+            if isinstance(button_type, str):
+                self._setup_session.receive_button(
+                    SetupButtonEvent(
+                        key[0], key[1], button_type, key[2], time.monotonic()
+                    )
+                )
         if (route := self._binding_routes.get(key)) is None:
             return
         zone_id, effect = route
+        if self._setup_session is not None and self._setup_session.zone_id == zone_id:
+            return
         if (engine := self._engines.get(zone_id)) is not None:
             self._hass.async_create_task(engine.async_external_action(effect))
 
@@ -312,6 +511,10 @@ class OpenCloseStopManager:
         self._closed = True
         self._remove_button_listener()
         self._remove_zone_listener()
+        if self._setup_session is not None:
+            session = self._setup_session
+            self._setup_session = None
+            await session.async_cancel()
         await asyncio.gather(
             *(engine.async_shutdown() for engine in tuple(self._engines.values()))
         )

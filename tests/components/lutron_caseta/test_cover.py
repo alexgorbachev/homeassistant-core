@@ -28,6 +28,7 @@ from homeassistant.components.lutron_caseta.const import (
     CONF_ESTIMATED_COVERS,
     CONF_OPEN_GUARD_SECONDS,
     CONF_OPEN_TRAVEL_SECONDS,
+    DOMAIN,
     LUTRON_CASETA_BUTTON_EVENT,
 )
 from homeassistant.components.lutron_caseta.estimated_cover import (
@@ -42,6 +43,7 @@ from homeassistant.const import (
     STATE_UNKNOWN,
 )
 from homeassistant.core import HomeAssistant, State
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.state import async_reproduce_state
 
@@ -161,6 +163,28 @@ async def test_open_close_stop_cover_commands(
     for unexpected_method in unexpected_methods:
         getattr(bridge, unexpected_method).assert_not_awaited()
     bridge.set_value.assert_not_awaited()
+
+
+async def test_command_only_cover_rejects_commands_during_setup(
+    hass: HomeAssistant, mock_bridge_with_cover_mocks: MockBridge
+) -> None:
+    """Reserve an unconfigured cover exclusively for its setup wizard."""
+    manager = next(
+        entry.runtime_data.open_close_stop_manager
+        for entry in hass.config_entries.async_entries(DOMAIN)
+    )
+    session = await manager.async_begin_setup("805")
+
+    with pytest.raises(HomeAssistantError, match="setup is in progress"):
+        await hass.services.async_call(
+            COVER_DOMAIN,
+            SERVICE_OPEN_COVER,
+            {ATTR_ENTITY_ID: OPEN_CLOSE_STOP_ENTITY_ID},
+            blocking=True,
+        )
+    mock_bridge_with_cover_mocks.raise_cover.assert_not_awaited()
+
+    await manager.async_end_setup(session)
 
 
 async def test_estimated_open_close_stop_cover_features_and_commands(

@@ -87,7 +87,22 @@
       "no_configured_covers": "No estimated OpenCloseStop covers are configured"
     },
     "error": {
-      "pico_already_assigned": "One of these Pico remotes is already assigned to another estimated cover"
+      "binding_already_assigned": "That Pico button and gesture is already assigned to a cover",
+      "calibration_capture_failed": "The mapped Pico movement was not completed or could not be correlated. Try this leg again.",
+      "capture_mismatch": "Motor activity could not be correlated to the captured Pico gesture. The motor was stopped for safety.",
+      "capture_timeout": "No complete Pico interaction was detected before the capture timed out.",
+      "command_failed": "The movement command failed. The cover remains unsynchronized.",
+      "pico_already_assigned": "One of these Pico remotes is already assigned to another estimated cover",
+      "setup_failed": "Home Assistant could not safely start guided setup. Check the Lutron connection and try again.",
+      "setup_in_progress": "Another setup or calibration session is already active for this integration",
+      "stop_failed": "Home Assistant could not confirm the Stop command. Check the motor before continuing.",
+      "verification_failed": "The expected Pico interaction was not completed. Try again.",
+      "verification_mismatch": "A different button or gesture was detected. Use the requested standard Pico action."
+    },
+    "progress": {
+      "calibrate_pico": "Waiting for the mapped direction and Stop actions…",
+      "learn_action": "Listening for a Pico or keypad gesture…",
+      "verify_binding": "Waiting for the requested standard Pico action…"
     },
     "step": {
       "add": {
@@ -96,44 +111,188 @@
         },
         "title": "Add an estimated cover"
       },
-      "cover": {
+      "add_method": {
+        "data": {
+          "device_class": "Cover type",
+          "setup_method": "Timing setup"
+        },
+        "description": "Set up {zone}. Guided calibration is recommended; manual timing is available for recovery or known measurements.",
+        "title": "Choose setup method"
+      },
+      "advanced_add": {
+        "data": {
+          "keypad_serial": "Pico or keypad"
+        },
+        "title": "Add an advanced mapping"
+      },
+      "advanced_binding": {
+        "data": {
+          "effect": "Cover action",
+          "gesture": "Gesture",
+          "leap_button_number": "Button"
+        },
+        "description": "Map one action from {keypad}. Long press is offered only when the processor reports native LongHold events.",
+        "title": "Configure action mapping"
+      },
+      "advanced_edit": {
+        "data": {
+          "binding": "Mapping"
+        },
+        "title": "Edit an action mapping"
+      },
+      "advanced_mappings": {
+        "menu_options": {
+          "advanced_add": "Add a mapping",
+          "advanced_edit": "Edit a mapping",
+          "advanced_remove": "Remove a mapping",
+          "zone": "Back to cover setup"
+        },
+        "title": "Advanced Pico and keypad mappings"
+      },
+      "advanced_remove": {
+        "data": {
+          "binding": "Mapping"
+        },
+        "title": "Remove an action mapping"
+      },
+      "calibrate": {
+        "data": {
+          "method": "Controls to use"
+        },
+        "description": "Calibrate {zone} with two complete movements in each direction. A third sample is requested when the first two differ by more than 0.75 seconds.",
+        "title": "Calibrate estimated position"
+      },
+      "calibration_ha_finish": {
+        "data": {
+          "reached_endpoint": "The motor reached the endpoint; send Stop"
+        },
+        "description": "The cover is moving {action}. Select this immediately when it reaches the endpoint. Purpose: {purpose}; sample: {sample}.",
+        "title": "Finish calibration movement"
+      },
+      "calibration_ha_start": {
+        "data": {
+          "start": "Start this movement"
+        },
+        "description": "Home Assistant will move the cover {action}. Purpose: {purpose}; sample: {sample}. You will Stop it on the next screen.",
+        "title": "Start calibration movement"
+      },
+      "calibration_pico_progress": {
+        "description": "Use the mapped {action} action, then use mapped Stop exactly when the endpoint is reached. Purpose: {purpose}; sample: {sample}.",
+        "title": "Calibrate with Pico"
+      },
+      "calibration_pico_retry": {
+        "data": {
+          "retry": "Retry this movement"
+        },
+        "description": "Retry the {action} leg. Purpose: {purpose}; sample: {sample}.",
+        "title": "Retry Pico calibration"
+      },
+      "calibration_summary": {
+        "data": {
+          "close_endpoint_guard_seconds": "Closed endpoint guard",
+          "open_endpoint_guard_seconds": "Open endpoint guard"
+        },
+        "description": "Open samples: {open_samples} (spread {open_spread}s), proposed {open_time}s. Close samples: {close_samples} (spread {close_spread}s), proposed {close_time}s.",
+        "title": "Accept calibration"
+      },
+      "configure": {
+        "data": {
+          "zone_id": "Cover"
+        },
+        "title": "Configure an estimated cover"
+      },
+      "init": {
+        "menu_options": {
+          "add": "Add an estimated cover",
+          "configure": "Configure an estimated cover"
+        },
+        "title": "Estimated OpenCloseStop covers"
+      },
+      "learn_action": {
+        "data": {
+          "effect": "Cover action"
+        },
+        "title": "Learn an action"
+      },
+      "learn_candidate": {
+        "data": {
+          "candidate": "Intended button gesture"
+        },
+        "description": "Choose the intended normalized gesture. Native multi-tap and long-press events are listed before their underlying press or release events.",
+        "title": "Confirm learned action"
+      },
+      "learn_progress": {
+        "description": "Perform the intended Pico or keypad gesture now. Directional actions are confirmed from the motor zone and then stopped automatically. Stop actions cannot be confirmed by the zone.",
+        "title": "Listening for an action"
+      },
+      "learn_start": {
+        "data": {
+          "start": "Begin listening"
+        },
+        "description": "Begin learning the {action} action. Directional learning may move the motor briefly and Home Assistant will send Stop after confirmation.",
+        "title": "Learn a Pico or keypad action"
+      },
+      "manual_timing": {
         "data": {
           "close_endpoint_guard_seconds": "Closed endpoint guard",
           "close_travel_seconds": "Full close travel time",
           "device_class": "Cover type",
           "open_endpoint_guard_seconds": "Open endpoint guard",
-          "open_travel_seconds": "Full open travel time",
-          "standard_picos": "Standard raise/lower Pico remotes"
+          "open_travel_seconds": "Full open travel time"
         },
         "data_description": {
           "close_endpoint_guard_seconds": "Extra close time used only when synchronizing at the endpoint.",
           "close_travel_seconds": "Time for a complete movement from fully open to fully closed.",
           "open_endpoint_guard_seconds": "Extra open time used only when synchronizing at the endpoint.",
-          "open_travel_seconds": "Time for a complete movement from fully closed to fully open.",
-          "standard_picos": "Press actions are mapped automatically: raise opens, lower closes, and favorite stops."
+          "open_travel_seconds": "Time for a complete movement from fully closed to fully open."
         },
-        "description": "Configure timing and Pico tracking for {zone}. Position remains an estimate because Lutron does not report physical position for this zone type.",
-        "title": "Configure estimated position"
+        "description": "Edit timing for {zone} without moving the motor. Guided calibration is safer when the travel time is not already known.",
+        "title": "Manually edit timing"
       },
-      "edit": {
-        "data": {
-          "zone_id": "Cover"
-        },
-        "title": "Edit an estimated cover"
-      },
-      "init": {
-        "menu_options": {
-          "add": "Add an estimated cover",
-          "edit": "Edit an estimated cover",
-          "remove": "Remove an estimated cover"
-        },
-        "title": "Estimated OpenCloseStop covers"
+      "overview": {
+        "description": "{zone}: open {open_time}s, close {close_time}s, {bindings} mapped actions. Timing source: {source}.",
+        "title": "Estimated-position overview"
       },
       "remove": {
         "data": {
-          "zone_id": "Cover"
+          "remove": "Remove estimated-position support"
         },
-        "title": "Remove an estimated cover"
+        "description": "Remove estimation for {zone}. The entity remains available as an Open/Close/Stop command-only cover.",
+        "title": "Remove estimated-position support"
+      },
+      "standard_picos": {
+        "data": {
+          "standard_picos": "Standard raise/lower Pico remotes"
+        },
+        "data_description": {
+          "standard_picos": "New remotes must be physically verified: raise opens, lower closes, and favorite stops. Existing ocs.2 mappings remain trusted."
+        },
+        "description": "Associate standard Pico remotes with {zone}.",
+        "title": "Standard Pico remotes"
+      },
+      "verify_binding": {
+        "data": {
+          "start": "Listen for this action"
+        },
+        "description": "On {pico}, perform {button} for {action}. Directional verification briefly moves the cover and then automatically sends Stop.",
+        "title": "Verify standard Pico action"
+      },
+      "verify_binding_progress": {
+        "description": "Perform the requested Pico action now.",
+        "title": "Verify standard Pico action"
+      },
+      "zone": {
+        "description": "Configure {zone}.",
+        "menu_options": {
+          "advanced_mappings": "Advanced mappings",
+          "calibrate": "Calibrate or recalibrate",
+          "learn_action": "Learn an action",
+          "manual_timing": "Manual timing adjustment",
+          "overview": "Overview",
+          "remove": "Remove estimated-position support",
+          "standard_picos": "Standard Pico remotes"
+        },
+        "title": "Estimated cover setup"
       }
     }
   }

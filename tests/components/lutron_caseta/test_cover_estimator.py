@@ -7,6 +7,12 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from homeassistant.components.cover import CoverDeviceClass
+from homeassistant.components.lutron_caseta.const import (
+    CONF_BINDINGS,
+    CONF_CALIBRATION,
+    CONF_CALIBRATION_SOURCE,
+    CONF_GESTURE,
+)
 from homeassistant.components.lutron_caseta.cover_estimator import (
     EstimatorState,
     ExternalAction,
@@ -125,6 +131,23 @@ async def test_known_position_moves_proportionally_and_stops(estimator_setup) ->
     assert estimator.snapshot.position == 20
     stop_cover.assert_awaited_once_with()
     assert raise_cover.await_count == 1
+
+
+async def test_setup_suspension_invalidates_after_stop_failure(estimator_setup) -> None:
+    """Remain unknown if setup cannot confirm Stop for active motion."""
+    estimator, fake_time, _, _, stop_cover, _ = estimator_setup
+    await _synchronize_closed(estimator, fake_time)
+    stop_cover.reset_mock()
+    await estimator.async_move_to(50)
+    stop_cover.side_effect = OSError("stop failed")
+
+    with pytest.raises(OSError, match="stop failed"):
+        await estimator.async_suspend_for_setup()
+
+    assert estimator.snapshot.state is EstimatorState.UNKNOWN
+    assert estimator.snapshot.position is None
+    assert estimator.snapshot.desynchronization_reason == "setup_started"
+    stop_cover.side_effect = None
 
 
 async def test_endpoint_request_always_applies_guard(estimator_setup) -> None:
@@ -308,3 +331,50 @@ def test_invalid_zone_options_do_not_block_valid_covers() -> None:
     )
 
     assert list(configs) == ["1"]
+
+
+@pytest.mark.parametrize(
+    "invalid_fields",
+    [
+        {
+            CONF_CALIBRATION: {
+                CONF_CALIBRATION_SOURCE: "future_source",
+                "open_samples": [],
+                "close_samples": [],
+            }
+        },
+        {
+            CONF_CALIBRATION: {
+                CONF_CALIBRATION_SOURCE: "guided_home_assistant",
+                "open_samples": [9.8],
+                "close_samples": [9.3, 9.4],
+            }
+        },
+        {
+            CONF_BINDINGS: [
+                {
+                    "keypad_serial": "1234",
+                    "leap_button_number": 3,
+                    "button_type": "raise",
+                    CONF_GESTURE: "triple_tap",
+                    "effect": "open",
+                }
+            ]
+        },
+    ],
+)
+def test_invalid_calibration_or_gesture_disables_only_zone(
+    invalid_fields: dict,
+) -> None:
+    """Reject unknown provenance and gestures at the options boundary."""
+    raw_config = EstimatedCoverConfig(
+        "1", CoverDeviceClass.BLIND, TravelTimes(9.8, 9.3, 1, 1), ()
+    ).as_dict()
+    raw_config.update(invalid_fields)
+
+    assert (
+        parse_estimated_cover_configs(
+            {"estimated_open_close_stop_covers": {"1": raw_config}}
+        )
+        == {}
+    )
