@@ -16,7 +16,12 @@ from homeassistant.helpers.device_registry import DeviceEntryType, DeviceInfo
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from . import DOMAIN
-from .const import CONFIG_URL, MANUFACTURER, UNASSIGNED_AREA
+from .const import (
+    CONFIG_URL,
+    DEVICE_TYPE_OPEN_CLOSE_STOP,
+    MANUFACTURER,
+    UNASSIGNED_AREA,
+)
 from .entity import LutronCasetaEntity
 from .models import LutronCasetaConfigEntry, LutronCasetaData
 from .util import area_name_from_id
@@ -47,6 +52,7 @@ async def async_setup_entry(
         (
             LutronCasetaBatterySensor(device, data)
             for device in bridge.get_devices_by_domain(COVER_DOMAIN)
+            if device["type"] != DEVICE_TYPE_OPEN_CLOSE_STOP
         ),
         update_before_add=True,
     )

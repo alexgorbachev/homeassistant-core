@@ -14,7 +14,8 @@ from homeassistant.components.cover import (
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
-from .entity import LutronCasetaUpdatableEntity
+from .const import DEVICE_TYPE_OPEN_CLOSE_STOP
+from .entity import LutronCasetaEntity, LutronCasetaUpdatableEntity
 from .models import LutronCasetaConfigEntry
 
 
@@ -24,6 +25,31 @@ class ShadeMovementDirection(Enum):
     OPENING = "opening"
     CLOSING = "closing"
     STOPPED = "stopped"
+
+
+class LutronCasetaOpenCloseStopCover(LutronCasetaEntity, CoverEntity):
+    """Representation of a cover without position feedback."""
+
+    _attr_assumed_state = True
+    _attr_is_closed: bool | None = None
+    _attr_supported_features = (
+        CoverEntityFeature.OPEN | CoverEntityFeature.CLOSE | CoverEntityFeature.STOP
+    )
+
+    @override
+    async def async_close_cover(self, **kwargs: Any) -> None:
+        """Close the cover."""
+        await self._smartbridge.lower_cover(self.device_id)
+
+    @override
+    async def async_open_cover(self, **kwargs: Any) -> None:
+        """Open the cover."""
+        await self._smartbridge.raise_cover(self.device_id)
+
+    @override
+    async def async_stop_cover(self, **kwargs: Any) -> None:
+        """Stop the cover."""
+        await self._smartbridge.stop_cover(self.device_id)
 
 
 class LutronCasetaShade(LutronCasetaUpdatableEntity, CoverEntity):
@@ -152,6 +178,7 @@ class LutronCasetaTiltOnlyBlind(LutronCasetaUpdatableEntity, CoverEntity):
 
 
 PYLUTRON_TYPE_TO_CLASSES = {
+    DEVICE_TYPE_OPEN_CLOSE_STOP: LutronCasetaOpenCloseStopCover,
     "SerenaTiltOnlyWoodBlind": LutronCasetaTiltOnlyBlind,
     "Tilt": LutronCasetaTiltOnlyBlind,
     "SerenaHoneycombShade": LutronCasetaShade,

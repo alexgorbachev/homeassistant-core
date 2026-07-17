@@ -48,6 +48,20 @@ async def test_battery_sensor_is_attached_to_shade_device(
     assert binary_sensor_entry.device_id == cover_entry.device_id
 
 
+async def test_open_close_stop_cover_has_no_battery_sensor(
+    hass: HomeAssistant, entity_registry: er.EntityRegistry
+) -> None:
+    """Test a logical OpenCloseStop zone does not create a battery sensor."""
+    await async_setup_integration(hass, MockBridge)
+
+    assert (
+        entity_registry.async_get_entity_id(
+            "binary_sensor", "lutron_caseta", "000004d2_805_battery"
+        )
+        is None
+    )
+
+
 async def test_battery_sensor_does_not_replace_shade_subscriber(
     hass: HomeAssistant,
 ) -> None:

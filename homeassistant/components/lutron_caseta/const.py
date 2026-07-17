@@ -17,6 +17,7 @@ BRIDGE_DEVICE_ID = "1"
 DEVICE_TYPE_WHITE_TUNE = "WhiteTune"
 DEVICE_TYPE_SPECTRUM_TUNE = "SpectrumTune"
 DEVICE_TYPE_COLOR_TUNE = "ColorTune"
+DEVICE_TYPE_OPEN_CLOSE_STOP = "OpenCloseStop"
 
 MANUFACTURER = "Lutron Electronics Co., Inc"
 
