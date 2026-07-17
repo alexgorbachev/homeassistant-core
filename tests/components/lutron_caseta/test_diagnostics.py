@@ -4,11 +4,21 @@ from unittest.mock import ANY
 
 from homeassistant.components.lutron_caseta import DOMAIN
 from homeassistant.components.lutron_caseta.const import (
+    CONF_BINDINGS,
     CONF_CA_CERTS,
+    CONF_CALIBRATION,
+    CONF_CALIBRATION_SOURCE,
     CONF_CERTFILE,
+    CONF_CLOSE_GUARD_SECONDS,
+    CONF_CLOSE_SAMPLES,
+    CONF_CLOSE_TRAVEL_SECONDS,
+    CONF_ESTIMATED_COVERS,
     CONF_KEYFILE,
+    CONF_OPEN_GUARD_SECONDS,
+    CONF_OPEN_SAMPLES,
+    CONF_OPEN_TRAVEL_SECONDS,
 )
-from homeassistant.const import CONF_HOST
+from homeassistant.const import CONF_DEVICE_CLASS, CONF_HOST
 from homeassistant.core import HomeAssistant
 
 from . import MockBridge, async_setup_integration
@@ -274,4 +284,75 @@ async def test_diagnostics(
                 },
             },
         },
+        "open_close_stop": {"covers": {}, "setup_session": None},
     }
+
+
+async def test_estimated_cover_diagnostics_are_useful_and_redacted(
+    hass: HomeAssistant, hass_client: ClientSessionGenerator
+) -> None:
+    """Expose estimator provenance and state without certificate paths or names."""
+    certificate_paths = {
+        CONF_KEYFILE: "/private/client-key.pem",
+        CONF_CERTFILE: "/private/client-cert.pem",
+        CONF_CA_CERTS: "/private/ca.pem",
+    }
+    options = {
+        CONF_ESTIMATED_COVERS: {
+            "805": {
+                CONF_DEVICE_CLASS: "blind",
+                CONF_OPEN_TRAVEL_SECONDS: 9.8,
+                CONF_CLOSE_TRAVEL_SECONDS: 9.3,
+                CONF_OPEN_GUARD_SECONDS: 1.0,
+                CONF_CLOSE_GUARD_SECONDS: 1.0,
+                CONF_BINDINGS: [
+                    {
+                        "keypad_serial": "68551522",
+                        "leap_button_number": 3,
+                        "button_type": "raise",
+                        "gesture": "press",
+                        "effect": "open",
+                    }
+                ],
+                CONF_CALIBRATION: {
+                    CONF_CALIBRATION_SOURCE: "guided_home_assistant",
+                    CONF_OPEN_SAMPLES: [9.7, 9.9],
+                    CONF_CLOSE_SAMPLES: [9.2, 9.4],
+                },
+            }
+        }
+    }
+    config_entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_HOST: "1.1.1.1", **certificate_paths},
+        options=options,
+        unique_id="abc",
+    )
+    config_entry.add_to_hass(hass)
+    await async_setup_integration(hass, MockBridge, config_entry.entry_id)
+
+    diagnostics = await get_diagnostics_for_config_entry(
+        hass, hass_client, config_entry
+    )
+
+    assert diagnostics["entry"]["data"] == {
+        CONF_HOST: "1.1.1.1",
+        CONF_KEYFILE: "**REDACTED**",
+        CONF_CERTFILE: "**REDACTED**",
+        CONF_CA_CERTS: "**REDACTED**",
+    }
+    cover = diagnostics["open_close_stop"]["covers"]["805"]
+    assert (
+        cover["calibration"] == options[CONF_ESTIMATED_COVERS]["805"][CONF_CALIBRATION]
+    )
+    assert cover["estimator"] == {
+        "state": "unknown",
+        "position": None,
+        "target": None,
+        "generation": 0,
+        "last_source": None,
+        "desynchronization_reason": "startup",
+    }
+    serialized = str(diagnostics["open_close_stop"])
+    assert "Motorized Window Treatment" not in serialized
+    assert all(path not in serialized for path in certificate_paths.values())

@@ -39,19 +39,28 @@ class LutronCasetaOpenCloseStopCover(LutronCasetaEntity, CoverEntity):
         CoverEntityFeature.OPEN | CoverEntityFeature.CLOSE | CoverEntityFeature.STOP
     )
 
+    def __init__(self, device, data) -> None:
+        """Initialize command routing and setup ownership checks."""
+        super().__init__(device, data)
+        self._manager = data.open_close_stop_manager
+        self._zone_id = str(device["zone"])
+
     @override
     async def async_close_cover(self, **kwargs: Any) -> None:
         """Close the cover."""
+        self._manager.ensure_commands_allowed(self._zone_id)
         await self._smartbridge.lower_cover(self.device_id)
 
     @override
     async def async_open_cover(self, **kwargs: Any) -> None:
         """Open the cover."""
+        self._manager.ensure_commands_allowed(self._zone_id)
         await self._smartbridge.raise_cover(self.device_id)
 
     @override
     async def async_stop_cover(self, **kwargs: Any) -> None:
         """Stop the cover."""
+        self._manager.ensure_commands_allowed(self._zone_id)
         await self._smartbridge.stop_cover(self.device_id)
 
 
@@ -124,21 +133,25 @@ class LutronCasetaEstimatedOpenCloseStopCover(LutronCasetaEntity, CoverEntity):
     @override
     async def async_close_cover(self, **kwargs: Any) -> None:
         """Close and synchronize at the lower endpoint."""
+        self._manager.ensure_commands_allowed(self._zone_id)
         await self._engine.async_move_to(0)
 
     @override
     async def async_open_cover(self, **kwargs: Any) -> None:
         """Open and synchronize at the upper endpoint."""
+        self._manager.ensure_commands_allowed(self._zone_id)
         await self._engine.async_move_to(100)
 
     @override
     async def async_stop_cover(self, **kwargs: Any) -> None:
         """Stop and retain a position only when motion was synchronized."""
+        self._manager.ensure_commands_allowed(self._zone_id)
         await self._engine.async_stop()
 
     @override
     async def async_set_cover_position(self, **kwargs: Any) -> None:
         """Move to an estimated percentage, synchronizing first if needed."""
+        self._manager.ensure_commands_allowed(self._zone_id)
         await self._engine.async_move_to(kwargs[ATTR_POSITION])
 
     def _handle_estimator_update(self) -> None:
