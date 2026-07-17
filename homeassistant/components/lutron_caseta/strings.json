@@ -80,5 +80,61 @@
       "press": "\"{subtype}\" pressed",
       "release": "\"{subtype}\" released"
     }
+  },
+  "options": {
+    "abort": {
+      "no_available_covers": "All discovered OpenCloseStop covers are already configured",
+      "no_configured_covers": "No estimated OpenCloseStop covers are configured"
+    },
+    "error": {
+      "pico_already_assigned": "One of these Pico remotes is already assigned to another estimated cover"
+    },
+    "step": {
+      "add": {
+        "data": {
+          "zone_id": "Cover"
+        },
+        "title": "Add an estimated cover"
+      },
+      "cover": {
+        "data": {
+          "close_endpoint_guard_seconds": "Closed endpoint guard",
+          "close_travel_seconds": "Full close travel time",
+          "device_class": "Cover type",
+          "open_endpoint_guard_seconds": "Open endpoint guard",
+          "open_travel_seconds": "Full open travel time",
+          "standard_picos": "Standard raise/lower Pico remotes"
+        },
+        "data_description": {
+          "close_endpoint_guard_seconds": "Extra close time used only when synchronizing at the endpoint.",
+          "close_travel_seconds": "Time for a complete movement from fully open to fully closed.",
+          "open_endpoint_guard_seconds": "Extra open time used only when synchronizing at the endpoint.",
+          "open_travel_seconds": "Time for a complete movement from fully closed to fully open.",
+          "standard_picos": "Press actions are mapped automatically: raise opens, lower closes, and favorite stops."
+        },
+        "description": "Configure timing and Pico tracking for {zone}. Position remains an estimate because Lutron does not report physical position for this zone type.",
+        "title": "Configure estimated position"
+      },
+      "edit": {
+        "data": {
+          "zone_id": "Cover"
+        },
+        "title": "Edit an estimated cover"
+      },
+      "init": {
+        "menu_options": {
+          "add": "Add an estimated cover",
+          "edit": "Edit an estimated cover",
+          "remove": "Remove an estimated cover"
+        },
+        "title": "Estimated OpenCloseStop covers"
+      },
+      "remove": {
+        "data": {
+          "zone_id": "Cover"
+        },
+        "title": "Remove an estimated cover"
+      }
+    }
   }
 }

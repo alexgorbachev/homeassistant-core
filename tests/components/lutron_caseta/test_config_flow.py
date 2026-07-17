@@ -15,18 +15,25 @@ from homeassistant.components.lutron_caseta import (
     config_flow as CasetaConfigFlow,
 )
 from homeassistant.components.lutron_caseta.const import (
+    CONF_BINDINGS,
     CONF_CA_CERTS,
     CONF_CERTFILE,
+    CONF_CLOSE_GUARD_SECONDS,
+    CONF_CLOSE_TRAVEL_SECONDS,
+    CONF_ESTIMATED_COVERS,
     CONF_KEYFILE,
+    CONF_OPEN_GUARD_SECONDS,
+    CONF_OPEN_TRAVEL_SECONDS,
+    CONF_STANDARD_PICOS,
     ERROR_CANNOT_CONNECT,
     STEP_IMPORT_FAILED,
 )
-from homeassistant.const import CONF_HOST
+from homeassistant.const import CONF_DEVICE_CLASS, CONF_HOST
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
 from homeassistant.helpers.service_info.zeroconf import ZeroconfServiceInfo
 
-from . import ENTRY_MOCK_DATA, MockBridge
+from . import ENTRY_MOCK_DATA, MockBridge, async_setup_integration
 
 from tests.common import MockConfigEntry
 
@@ -406,6 +413,158 @@ async def test_form_user_reuses_existing_assets_when_pairing_again(
         CONF_CERTFILE: "lutron_caseta-1.1.1.1-cert.pem",
         CONF_CA_CERTS: "lutron_caseta-1.1.1.1-ca.pem",
     }
+
+
+async def test_estimated_cover_options_flow_add(hass: HomeAssistant) -> None:
+    """Test adding timing and standard Pico bindings through native options."""
+    entry = await async_setup_integration(hass, MockBridge)
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    assert result["type"] is FlowResultType.MENU
+    assert result["menu_options"] == ["add"]
+
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"next_step_id": "add"}
+    )
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "add"
+
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"zone_id": "805"}
+    )
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "cover"
+
+    with patch.object(
+        hass.config_entries, "async_reload", AsyncMock(return_value=True)
+    ):
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            {
+                CONF_DEVICE_CLASS: "blind",
+                CONF_OPEN_TRAVEL_SECONDS: 9.8,
+                CONF_CLOSE_TRAVEL_SECONDS: 9.3,
+                CONF_OPEN_GUARD_SECONDS: 1.0,
+                CONF_CLOSE_GUARD_SECONDS: 1.0,
+                CONF_STANDARD_PICOS: ["68551522"],
+            },
+        )
+        await hass.async_block_till_done()
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    cover = result["data"][CONF_ESTIMATED_COVERS]["805"]
+    assert cover[CONF_DEVICE_CLASS] == "blind"
+    assert cover[CONF_OPEN_TRAVEL_SECONDS] == 9.8
+    assert cover[CONF_CLOSE_TRAVEL_SECONDS] == 9.3
+    assert cover[CONF_OPEN_GUARD_SECONDS] == 1.0
+    assert cover[CONF_CLOSE_GUARD_SECONDS] == 1.0
+    assert cover[CONF_BINDINGS] == [
+        {
+            "keypad_serial": "68551522",
+            "leap_button_number": 3,
+            "button_type": "raise",
+            "gesture": "press",
+            "effect": "open",
+        },
+        {
+            "keypad_serial": "68551522",
+            "leap_button_number": 4,
+            "button_type": "lower",
+            "gesture": "press",
+            "effect": "close",
+        },
+        {
+            "keypad_serial": "68551522",
+            "leap_button_number": 1,
+            "button_type": "stop",
+            "gesture": "press",
+            "effect": "stop",
+        },
+    ]
+
+
+async def test_estimated_cover_options_flow_remove(hass: HomeAssistant) -> None:
+    """Test removing estimation returns the zone to command-only behavior."""
+    options = {
+        CONF_ESTIMATED_COVERS: {
+            "805": {
+                CONF_DEVICE_CLASS: "blind",
+                CONF_OPEN_TRAVEL_SECONDS: 9.8,
+                CONF_CLOSE_TRAVEL_SECONDS: 9.3,
+                CONF_OPEN_GUARD_SECONDS: 1.0,
+                CONF_CLOSE_GUARD_SECONDS: 1.0,
+                CONF_BINDINGS: [],
+            }
+        },
+        "unrelated": True,
+    }
+    entry = await async_setup_integration(hass, MockBridge, options=options)
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    assert result["menu_options"] == ["add", "edit", "remove"]
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"next_step_id": "remove"}
+    )
+    with patch.object(
+        hass.config_entries, "async_reload", AsyncMock(return_value=True)
+    ):
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], {"zone_id": "805"}
+        )
+        await hass.async_block_till_done()
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert result["data"] == {CONF_ESTIMATED_COVERS: {}, "unrelated": True}
+
+
+async def test_estimated_cover_options_flow_edit(hass: HomeAssistant) -> None:
+    """Test editing timing preserves the configured zone and unrelated options."""
+    options = {
+        CONF_ESTIMATED_COVERS: {
+            "805": {
+                CONF_DEVICE_CLASS: "blind",
+                CONF_OPEN_TRAVEL_SECONDS: 10.0,
+                CONF_CLOSE_TRAVEL_SECONDS: 10.0,
+                CONF_OPEN_GUARD_SECONDS: 1.0,
+                CONF_CLOSE_GUARD_SECONDS: 1.0,
+                CONF_BINDINGS: [],
+            }
+        },
+        "unrelated": True,
+    }
+    entry = await async_setup_integration(hass, MockBridge, options=options)
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"next_step_id": "edit"}
+    )
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"zone_id": "805"}
+    )
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "cover"
+
+    with patch.object(
+        hass.config_entries, "async_reload", AsyncMock(return_value=True)
+    ):
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            {
+                CONF_DEVICE_CLASS: "curtain",
+                CONF_OPEN_TRAVEL_SECONDS: 9.8,
+                CONF_CLOSE_TRAVEL_SECONDS: 9.3,
+                CONF_OPEN_GUARD_SECONDS: 1.0,
+                CONF_CLOSE_GUARD_SECONDS: 1.0,
+                CONF_STANDARD_PICOS: [],
+            },
+        )
+        await hass.async_block_till_done()
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert result["data"]["unrelated"] is True
+    cover = result["data"][CONF_ESTIMATED_COVERS]["805"]
+    assert cover[CONF_DEVICE_CLASS] == "curtain"
+    assert cover[CONF_OPEN_TRAVEL_SECONDS] == 9.8
 
 
 async def test_zeroconf_host_already_configured(

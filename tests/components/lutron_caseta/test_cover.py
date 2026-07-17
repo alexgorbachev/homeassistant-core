@@ -1,8 +1,10 @@
 """Tests for the Lutron Caseta integration."""
 
+import asyncio
 from typing import Any
 from unittest.mock import AsyncMock
 
+from pylutron_caseta.smartbridge import ZoneStatusEvent, ZoneStatusEventOrigin
 import pytest
 
 from homeassistant.components.cover import (
@@ -10,24 +12,59 @@ from homeassistant.components.cover import (
     DOMAIN as COVER_DOMAIN,
     SERVICE_CLOSE_COVER,
     SERVICE_OPEN_COVER,
+    SERVICE_SET_COVER_POSITION,
     SERVICE_STOP_COVER,
     CoverEntityFeature,
+    CoverState,
+)
+from homeassistant.components.lutron_caseta.const import (
+    ACTION_PRESS,
+    ATTR_ACTION,
+    ATTR_LEAP_BUTTON_NUMBER,
+    ATTR_SERIAL,
+    CONF_BINDINGS,
+    CONF_CLOSE_GUARD_SECONDS,
+    CONF_CLOSE_TRAVEL_SECONDS,
+    CONF_ESTIMATED_COVERS,
+    CONF_OPEN_GUARD_SECONDS,
+    CONF_OPEN_TRAVEL_SECONDS,
+    LUTRON_CASETA_BUTTON_EVENT,
+)
+from homeassistant.components.lutron_caseta.estimated_cover import (
+    standard_pico_bindings,
 )
 from homeassistant.const import (
     ATTR_ASSUMED_STATE,
     ATTR_DEVICE_CLASS,
     ATTR_ENTITY_ID,
     ATTR_SUPPORTED_FEATURES,
+    CONF_DEVICE_CLASS,
     STATE_UNKNOWN,
 )
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, State
 from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers.state import async_reproduce_state
 
 from . import MockBridge, async_setup_integration
 
 OPEN_CLOSE_STOP_ENTITY_ID = (
     "cover.basement_bedroom_basement_bedroom_motorized_window_treatment"
 )
+
+ESTIMATED_OPTIONS = {
+    CONF_ESTIMATED_COVERS: {
+        "805": {
+            CONF_DEVICE_CLASS: "blind",
+            CONF_OPEN_TRAVEL_SECONDS: 10.0,
+            CONF_CLOSE_TRAVEL_SECONDS: 10.0,
+            CONF_OPEN_GUARD_SECONDS: 1.0,
+            CONF_CLOSE_GUARD_SECONDS: 1.0,
+            CONF_BINDINGS: [
+                binding.as_dict() for binding in standard_pico_bindings(["68551522"])
+            ],
+        }
+    }
+}
 
 
 @pytest.fixture
@@ -124,6 +161,194 @@ async def test_open_close_stop_cover_commands(
     for unexpected_method in unexpected_methods:
         getattr(bridge, unexpected_method).assert_not_awaited()
     bridge.set_value.assert_not_awaited()
+
+
+async def test_estimated_open_close_stop_cover_features_and_commands(
+    hass: HomeAssistant,
+) -> None:
+    """Test a configured cover exposes position control and synchronizes first."""
+    bridge = MockBridge()
+    bridge.raise_cover = AsyncMock()
+    bridge.lower_cover = AsyncMock()
+    bridge.stop_cover = AsyncMock()
+    bridge.set_value = AsyncMock()
+    await async_setup_integration(
+        hass, lambda **kwargs: bridge, options=ESTIMATED_OPTIONS
+    )
+
+    state = hass.states.get(OPEN_CLOSE_STOP_ENTITY_ID)
+    assert state is not None
+    assert state.state == STATE_UNKNOWN
+    assert state.attributes[ATTR_ASSUMED_STATE] is True
+    assert state.attributes[ATTR_DEVICE_CLASS] == "blind"
+    assert state.attributes[ATTR_SUPPORTED_FEATURES] == (
+        CoverEntityFeature.OPEN
+        | CoverEntityFeature.CLOSE
+        | CoverEntityFeature.STOP
+        | CoverEntityFeature.SET_POSITION
+    )
+
+    await hass.services.async_call(
+        COVER_DOMAIN,
+        SERVICE_SET_COVER_POSITION,
+        {ATTR_ENTITY_ID: OPEN_CLOSE_STOP_ENTITY_ID, "position": 25},
+        blocking=True,
+    )
+
+    bridge.stop_cover.assert_awaited_once_with("805")
+    bridge.lower_cover.assert_awaited_once_with("805")
+    bridge.raise_cover.assert_not_awaited()
+    bridge.set_value.assert_not_awaited()
+    state = hass.states.get(OPEN_CLOSE_STOP_ENTITY_ID)
+    assert state is not None
+    assert state.state == "closing"
+    assert ATTR_CURRENT_POSITION not in state.attributes
+
+    await hass.services.async_call(
+        COVER_DOMAIN,
+        SERVICE_STOP_COVER,
+        {ATTR_ENTITY_ID: OPEN_CLOSE_STOP_ENTITY_ID},
+        blocking=True,
+    )
+    assert bridge.stop_cover.await_count == 2
+    assert hass.states.get(OPEN_CLOSE_STOP_ENTITY_ID).state == STATE_UNKNOWN
+
+
+async def test_estimated_cover_accepts_scene_percentage(hass: HomeAssistant) -> None:
+    """Test scene reproduction routes a target percentage to the estimator."""
+    bridge = MockBridge()
+    bridge.raise_cover = AsyncMock()
+    bridge.lower_cover = AsyncMock()
+    bridge.stop_cover = AsyncMock()
+    await async_setup_integration(
+        hass, lambda **kwargs: bridge, options=ESTIMATED_OPTIONS
+    )
+
+    await async_reproduce_state(
+        hass,
+        [
+            State(
+                OPEN_CLOSE_STOP_ENTITY_ID,
+                CoverState.OPEN,
+                {ATTR_CURRENT_POSITION: 50},
+            )
+        ],
+    )
+
+    bridge.stop_cover.assert_awaited_once_with("805")
+    bridge.lower_cover.assert_awaited_once_with("805")
+    bridge.raise_cover.assert_not_awaited()
+
+
+async def test_invalid_estimator_options_fall_back_to_command_only(
+    hass: HomeAssistant,
+) -> None:
+    """Test one invalid external option cannot prevent integration setup."""
+    invalid_options = {
+        CONF_ESTIMATED_COVERS: {
+            "805": ESTIMATED_OPTIONS[CONF_ESTIMATED_COVERS]["805"]
+            | {CONF_OPEN_TRAVEL_SECONDS: -1}
+        }
+    }
+    await async_setup_integration(hass, MockBridge, options=invalid_options)
+
+    state = hass.states.get(OPEN_CLOSE_STOP_ENTITY_ID)
+    assert state is not None
+    assert state.attributes[ATTR_SUPPORTED_FEATURES] == (
+        CoverEntityFeature.OPEN | CoverEntityFeature.CLOSE | CoverEntityFeature.STOP
+    )
+    assert ATTR_CURRENT_POSITION not in state.attributes
+
+
+async def test_estimated_cover_tracks_standard_pico_without_commands(
+    hass: HomeAssistant,
+) -> None:
+    """Test Pico presses update timing without duplicate bridge commands."""
+    bridge = MockBridge()
+    bridge.raise_cover = AsyncMock()
+    bridge.lower_cover = AsyncMock()
+    bridge.stop_cover = AsyncMock()
+    await async_setup_integration(
+        hass, lambda **kwargs: bridge, options=ESTIMATED_OPTIONS
+    )
+
+    hass.bus.async_fire(
+        LUTRON_CASETA_BUTTON_EVENT,
+        {
+            ATTR_SERIAL: "68551522",
+            ATTR_LEAP_BUTTON_NUMBER: 3,
+            ATTR_ACTION: ACTION_PRESS,
+        },
+    )
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    state = hass.states.get(OPEN_CLOSE_STOP_ENTITY_ID)
+    assert state is not None
+    assert state.state == "opening"
+    assert ATTR_CURRENT_POSITION not in state.attributes
+    bridge.raise_cover.assert_not_awaited()
+    bridge.lower_cover.assert_not_awaited()
+    bridge.stop_cover.assert_not_awaited()
+
+    hass.bus.async_fire(
+        LUTRON_CASETA_BUTTON_EVENT,
+        {
+            ATTR_SERIAL: "68551522",
+            ATTR_LEAP_BUTTON_NUMBER: 1,
+            ATTR_ACTION: ACTION_PRESS,
+        },
+    )
+    await hass.async_block_till_done()
+    assert hass.states.get(OPEN_CLOSE_STOP_ENTITY_ID).state == STATE_UNKNOWN
+
+
+async def test_estimated_cover_invalidates_on_reconnect_snapshot(
+    hass: HomeAssistant,
+) -> None:
+    """Test a reconnect snapshot leaves the volatile estimate unknown."""
+    bridge = MockBridge()
+    await async_setup_integration(
+        hass, lambda **kwargs: bridge, options=ESTIMATED_OPTIONS
+    )
+
+    bridge.call_zone_status_subscribers(
+        ZoneStatusEvent(
+            "805",
+            "805",
+            {"Zone": {"href": "/zone/805"}},
+            ZoneStatusEventOrigin.INITIAL,
+        )
+    )
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert hass.states.get(OPEN_CLOSE_STOP_ENTITY_ID).state == STATE_UNKNOWN
+
+
+async def test_estimated_cover_stops_before_bridge_unload(
+    hass: HomeAssistant,
+) -> None:
+    """Test integration shutdown stops active motion before closing the bridge."""
+    bridge = MockBridge()
+    bridge.stop_cover = AsyncMock()
+    entry = await async_setup_integration(
+        hass, lambda **kwargs: bridge, options=ESTIMATED_OPTIONS
+    )
+    hass.bus.async_fire(
+        LUTRON_CASETA_BUTTON_EVENT,
+        {
+            ATTR_SERIAL: "68551522",
+            ATTR_LEAP_BUTTON_NUMBER: 3,
+            ATTR_ACTION: ACTION_PRESS,
+        },
+    )
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    assert await hass.config_entries.async_unload(entry.entry_id)
+
+    bridge.stop_cover.assert_awaited_once_with("805")
+    assert not bridge.is_connected()
 
 
 async def test_cover_open_close_using_set_value(

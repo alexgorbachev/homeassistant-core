@@ -10,9 +10,11 @@ from pylutron_caseta.pairing import PAIR_CA, PAIR_CERT, PAIR_KEY, async_pair
 from pylutron_caseta.smartbridge import Smartbridge
 import voluptuous as vol
 
-from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
-from homeassistant.const import CONF_HOST, CONF_NAME
+from homeassistant.components.cover import CoverDeviceClass
+from homeassistant.config_entries import ConfigFlow, ConfigFlowResult, OptionsFlow
+from homeassistant.const import CONF_DEVICE_CLASS, CONF_HOST, CONF_NAME
 from homeassistant.core import callback
+from homeassistant.helpers import selector
 from homeassistant.helpers.service_info.zeroconf import ZeroconfServiceInfo
 
 from .const import (
@@ -20,12 +22,36 @@ from .const import (
     BRIDGE_DEVICE_ID,
     CONF_CA_CERTS,
     CONF_CERTFILE,
+    CONF_CLOSE_GUARD_SECONDS,
+    CONF_CLOSE_TRAVEL_SECONDS,
+    CONF_ESTIMATED_COVERS,
     CONF_KEYFILE,
+    CONF_OPEN_GUARD_SECONDS,
+    CONF_OPEN_TRAVEL_SECONDS,
+    CONF_STANDARD_PICOS,
     CONFIGURE_TIMEOUT,
     CONNECT_TIMEOUT,
+    DEVICE_TYPE_OPEN_CLOSE_STOP,
     DOMAIN,
     ERROR_CANNOT_CONNECT,
     STEP_IMPORT_FAILED,
+)
+from .cover_estimator import TravelTimes
+from .estimated_cover import (
+    MAX_GUARD_SECONDS,
+    MAX_TRAVEL_SECONDS,
+    MIN_TRAVEL_SECONDS,
+    SUPPORTED_DEVICE_CLASSES,
+    EstimatedCoverConfig,
+    parse_estimated_cover_configs,
+    standard_pico_bindings,
+)
+from .models import (
+    LUTRON_KEYPAD_AREA_NAME,
+    LUTRON_KEYPAD_NAME,
+    LUTRON_KEYPAD_SERIAL,
+    LUTRON_KEYPAD_TYPE,
+    LutronCasetaConfigEntry,
 )
 
 HOSTNAME = "hostname"
@@ -56,6 +82,15 @@ class LutronCasetaFlowHandler(ConfigFlow, domain=DOMAIN):
         self.lutron_id: str | None = None
         self.tls_assets_validated = False
         self.attempted_tls_validation = False
+
+    @staticmethod
+    @callback
+    @override
+    def async_get_options_flow(
+        config_entry: LutronCasetaConfigEntry,
+    ) -> LutronCasetaOptionsFlow:
+        """Return the estimated-cover options flow."""
+        return LutronCasetaOptionsFlow()
 
     @override
     async def async_step_user(
@@ -252,3 +287,256 @@ class LutronCasetaFlowHandler(ConfigFlow, domain=DOMAIN):
             await bridge.close()
 
         return None
+
+
+class LutronCasetaOptionsFlow(OptionsFlow):
+    """Manage calibrated OpenCloseStop covers."""
+
+    def __init__(self) -> None:
+        """Initialize transient flow state."""
+        self._zone_id: str | None = None
+
+    async def async_step_init(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Show available estimated-cover operations."""
+        configs = parse_estimated_cover_configs(self.config_entry.options)
+        menu_options = ["add"]
+        if configs:
+            menu_options.extend(("edit", "remove"))
+        return self.async_show_menu(step_id="init", menu_options=menu_options)
+
+    async def async_step_add(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Select an unconfigured OpenCloseStop zone."""
+        configured = parse_estimated_cover_configs(self.config_entry.options)
+        options = self._cover_options(exclude=set(configured))
+        if not options:
+            return self.async_abort(reason="no_available_covers")
+        if user_input is not None:
+            self._zone_id = user_input["zone_id"]
+            return await self.async_step_cover()
+        return self.async_show_form(
+            step_id="add",
+            data_schema=vol.Schema(
+                {
+                    vol.Required("zone_id"): selector.SelectSelector(
+                        selector.SelectSelectorConfig(options=options)
+                    )
+                }
+            ),
+        )
+
+    async def async_step_edit(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Select an estimated cover to edit."""
+        configs = parse_estimated_cover_configs(self.config_entry.options)
+        if not configs:
+            return self.async_abort(reason="no_configured_covers")
+        if user_input is not None:
+            self._zone_id = user_input["zone_id"]
+            return await self.async_step_cover()
+        return self.async_show_form(
+            step_id="edit",
+            data_schema=vol.Schema(
+                {
+                    vol.Required("zone_id"): selector.SelectSelector(
+                        selector.SelectSelectorConfig(
+                            options=self._cover_options(include=set(configs))
+                        )
+                    )
+                }
+            ),
+        )
+
+    async def async_step_remove(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Remove estimation while leaving the command-only cover available."""
+        configs = parse_estimated_cover_configs(self.config_entry.options)
+        if not configs:
+            return self.async_abort(reason="no_configured_covers")
+        if user_input is not None:
+            return self._save_zone(user_input["zone_id"], None)
+        return self.async_show_form(
+            step_id="remove",
+            data_schema=vol.Schema(
+                {
+                    vol.Required("zone_id"): selector.SelectSelector(
+                        selector.SelectSelectorConfig(
+                            options=self._cover_options(include=set(configs))
+                        )
+                    )
+                }
+            ),
+        )
+
+    async def async_step_cover(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Configure timing and standard Pico associations for one cover."""
+        assert self._zone_id is not None
+        configs = parse_estimated_cover_configs(self.config_entry.options)
+        existing = configs.get(self._zone_id)
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            candidate = EstimatedCoverConfig(
+                self._zone_id,
+                CoverDeviceClass(user_input[CONF_DEVICE_CLASS]),
+                TravelTimes(
+                    user_input[CONF_OPEN_TRAVEL_SECONDS],
+                    user_input[CONF_CLOSE_TRAVEL_SECONDS],
+                    user_input[CONF_OPEN_GUARD_SECONDS],
+                    user_input[CONF_CLOSE_GUARD_SECONDS],
+                ),
+                standard_pico_bindings(user_input[CONF_STANDARD_PICOS]),
+            )
+            claimed = {
+                binding.event_key
+                for zone_id, config in configs.items()
+                if zone_id != self._zone_id
+                for binding in config.bindings
+            }
+            if any(binding.event_key in claimed for binding in candidate.bindings):
+                errors[CONF_STANDARD_PICOS] = "pico_already_assigned"
+            else:
+                return self._save_zone(self._zone_id, candidate)
+
+        default_times = existing.travel_times if existing else TravelTimes(10, 10, 1, 1)
+        selected_picos = (
+            list(dict.fromkeys(binding.keypad_serial for binding in existing.bindings))
+            if existing
+            else []
+        )
+        return self.async_show_form(
+            step_id="cover",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(
+                        CONF_DEVICE_CLASS,
+                        default=(
+                            existing.device_class
+                            if existing
+                            else CoverDeviceClass.BLIND
+                        ),
+                    ): selector.SelectSelector(
+                        selector.SelectSelectorConfig(
+                            options=[
+                                device_class.value
+                                for device_class in SUPPORTED_DEVICE_CLASSES
+                            ]
+                        )
+                    ),
+                    vol.Required(
+                        CONF_OPEN_TRAVEL_SECONDS,
+                        default=default_times.open_seconds,
+                    ): selector.NumberSelector(
+                        selector.NumberSelectorConfig(
+                            min=MIN_TRAVEL_SECONDS,
+                            max=MAX_TRAVEL_SECONDS,
+                            step=0.1,
+                            mode=selector.NumberSelectorMode.BOX,
+                            unit_of_measurement="s",
+                        )
+                    ),
+                    vol.Required(
+                        CONF_CLOSE_TRAVEL_SECONDS,
+                        default=default_times.close_seconds,
+                    ): selector.NumberSelector(
+                        selector.NumberSelectorConfig(
+                            min=MIN_TRAVEL_SECONDS,
+                            max=MAX_TRAVEL_SECONDS,
+                            step=0.1,
+                            mode=selector.NumberSelectorMode.BOX,
+                            unit_of_measurement="s",
+                        )
+                    ),
+                    vol.Required(
+                        CONF_OPEN_GUARD_SECONDS,
+                        default=default_times.open_guard_seconds,
+                    ): selector.NumberSelector(
+                        selector.NumberSelectorConfig(
+                            min=0,
+                            max=MAX_GUARD_SECONDS,
+                            step=0.1,
+                            mode=selector.NumberSelectorMode.BOX,
+                            unit_of_measurement="s",
+                        )
+                    ),
+                    vol.Required(
+                        CONF_CLOSE_GUARD_SECONDS,
+                        default=default_times.close_guard_seconds,
+                    ): selector.NumberSelector(
+                        selector.NumberSelectorConfig(
+                            min=0,
+                            max=MAX_GUARD_SECONDS,
+                            step=0.1,
+                            mode=selector.NumberSelectorMode.BOX,
+                            unit_of_measurement="s",
+                        )
+                    ),
+                    vol.Required(
+                        CONF_STANDARD_PICOS, default=selected_picos
+                    ): selector.SelectSelector(
+                        selector.SelectSelectorConfig(
+                            options=self._pico_options(), multiple=True
+                        )
+                    ),
+                }
+            ),
+            errors=errors,
+            description_placeholders={"zone": self._cover_label(self._zone_id)},
+        )
+
+    def _save_zone(
+        self, zone_id: str, config: EstimatedCoverConfig | None
+    ) -> ConfigFlowResult:
+        """Persist one zone while preserving unrelated integration options."""
+        options = dict(self.config_entry.options)
+        raw_covers = options.get(CONF_ESTIMATED_COVERS, {})
+        covers = dict(raw_covers) if isinstance(raw_covers, dict) else {}
+        if config is None:
+            covers.pop(zone_id, None)
+        else:
+            covers[zone_id] = config.as_dict()
+        options[CONF_ESTIMATED_COVERS] = covers
+        return self.async_create_entry(title="", data=options)
+
+    def _cover_options(
+        self,
+        *,
+        include: set[str] | None = None,
+        exclude: set[str] | None = None,
+    ) -> list[selector.SelectOptionDict]:
+        """Build selectors from live OpenCloseStop discovery."""
+        return [
+            selector.SelectOptionDict(value=zone_id, label=self._cover_label(zone_id))
+            for device in self.config_entry.runtime_data.bridge.get_devices_by_type(
+                DEVICE_TYPE_OPEN_CLOSE_STOP
+            )
+            if (zone_id := str(device["zone"]))
+            and (include is None or zone_id in include)
+            and (exclude is None or zone_id not in exclude)
+        ]
+
+    def _cover_label(self, zone_id: str) -> str:
+        """Return a useful live name for an OpenCloseStop zone."""
+        bridge = self.config_entry.runtime_data.bridge
+        device = bridge.get_device_by_zone_id(zone_id)
+        return f"{device['name']} (zone {zone_id})"
+
+    def _pico_options(self) -> list[selector.SelectOptionDict]:
+        """List compatible standard raise/lower Picos."""
+        return [
+            selector.SelectOptionDict(
+                value=str(keypad[LUTRON_KEYPAD_SERIAL]),
+                label=(
+                    f"{keypad[LUTRON_KEYPAD_AREA_NAME]} {keypad[LUTRON_KEYPAD_NAME]}"
+                ),
+            )
+            for keypad in self.config_entry.runtime_data.keypad_data.keypads.values()
+            if keypad[LUTRON_KEYPAD_TYPE] == "Pico3ButtonRaiseLower"
+        ]

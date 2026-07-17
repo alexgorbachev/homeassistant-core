@@ -9,6 +9,8 @@ import voluptuous as vol
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.helpers.device_registry import DeviceInfo
 
+from .estimated_cover import OpenCloseStopManager
+
 type LutronCasetaConfigEntry = ConfigEntry[LutronCasetaData]
 
 
@@ -19,6 +21,7 @@ class LutronCasetaData:
     bridge: Smartbridge
     bridge_device: dict[str, Any]
     keypad_data: LutronKeypadData
+    open_close_stop_manager: OpenCloseStopManager
 
 
 @dataclass
