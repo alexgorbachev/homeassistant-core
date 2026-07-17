@@ -6,16 +6,28 @@ from unittest.mock import AsyncMock
 import pytest
 
 from homeassistant.components.cover import (
+    ATTR_CURRENT_POSITION,
     DOMAIN as COVER_DOMAIN,
     SERVICE_CLOSE_COVER,
     SERVICE_OPEN_COVER,
     SERVICE_STOP_COVER,
+    CoverEntityFeature,
 )
-from homeassistant.const import ATTR_ENTITY_ID
+from homeassistant.const import (
+    ATTR_ASSUMED_STATE,
+    ATTR_DEVICE_CLASS,
+    ATTR_ENTITY_ID,
+    ATTR_SUPPORTED_FEATURES,
+    STATE_UNKNOWN,
+)
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
 
 from . import MockBridge, async_setup_integration
+
+OPEN_CLOSE_STOP_ENTITY_ID = (
+    "cover.basement_bedroom_basement_bedroom_motorized_window_treatment"
+)
 
 
 @pytest.fixture
@@ -50,6 +62,68 @@ async def test_cover_unique_id(
     # Assert that Caseta covers will have the bridge serial hash
     # and the zone id as the uniqueID
     assert entity_registry.async_get(cover_entity_id).unique_id == "000004d2_802"
+
+
+async def test_open_close_stop_cover_has_unknown_state(
+    hass: HomeAssistant, mock_bridge_with_cover_mocks: MockBridge
+) -> None:
+    """Test an OpenCloseStop cover exposes commands without a position."""
+    state = hass.states.get(OPEN_CLOSE_STOP_ENTITY_ID)
+
+    assert state is not None
+    assert state.state == STATE_UNKNOWN
+    assert state.attributes[ATTR_ASSUMED_STATE] is True
+    assert state.attributes[ATTR_SUPPORTED_FEATURES] == (
+        CoverEntityFeature.OPEN | CoverEntityFeature.CLOSE | CoverEntityFeature.STOP
+    )
+    assert ATTR_CURRENT_POSITION not in state.attributes
+    assert ATTR_DEVICE_CLASS not in state.attributes
+
+
+@pytest.mark.parametrize(
+    ("service", "bridge_method", "unexpected_methods"),
+    [
+        pytest.param(
+            SERVICE_OPEN_COVER,
+            "raise_cover",
+            ("lower_cover", "stop_cover"),
+            id="open",
+        ),
+        pytest.param(
+            SERVICE_CLOSE_COVER,
+            "lower_cover",
+            ("raise_cover", "stop_cover"),
+            id="close",
+        ),
+        pytest.param(
+            SERVICE_STOP_COVER,
+            "stop_cover",
+            ("raise_cover", "lower_cover"),
+            id="stop",
+        ),
+    ],
+)
+async def test_open_close_stop_cover_commands(
+    hass: HomeAssistant,
+    mock_bridge_with_cover_mocks: MockBridge,
+    service: str,
+    bridge_method: str,
+    unexpected_methods: tuple[str, str],
+) -> None:
+    """Test OpenCloseStop commands call only their matching bridge method."""
+    bridge = mock_bridge_with_cover_mocks
+
+    await hass.services.async_call(
+        COVER_DOMAIN,
+        service,
+        {ATTR_ENTITY_ID: OPEN_CLOSE_STOP_ENTITY_ID},
+        blocking=True,
+    )
+
+    getattr(bridge, bridge_method).assert_awaited_once_with("805")
+    for unexpected_method in unexpected_methods:
+        getattr(bridge, unexpected_method).assert_not_awaited()
+    bridge.set_value.assert_not_awaited()
 
 
 async def test_cover_open_close_using_set_value(

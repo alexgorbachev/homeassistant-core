@@ -14,6 +14,7 @@ from homeassistant.components.lutron_caseta.const import (
     CONF_CA_CERTS,
     CONF_CERTFILE,
     CONF_KEYFILE,
+    DEVICE_TYPE_OPEN_CLOSE_STOP,
 )
 from homeassistant.const import CONF_HOST
 from homeassistant.core import HomeAssistant
@@ -67,6 +68,7 @@ _LEAP_DEVICE_TYPES = {
         "RightDrawDrape",
         "Shade",
         "SerenaTiltOnlyWoodBlind",
+        DEVICE_TYPE_OPEN_CLOSE_STOP,
     ],
     "sensor": [
         "Pico1Button",
@@ -244,6 +246,19 @@ class MockBridge:
                 "name": "Basement Bedroom_Left Shade",
                 "button_groups": None,
                 "type": "SerenaRollerShade",
+                "model": None,
+                "serial": None,
+                "tilt": None,
+                "area": "822",
+            },
+            "805": {
+                "device_id": "805",
+                "current_state": -1,
+                "fan_speed": None,
+                "zone": "805",
+                "name": "Basement Bedroom_Motorized Window Treatment",
+                "button_groups": None,
+                "type": DEVICE_TYPE_OPEN_CLOSE_STOP,
                 "model": None,
                 "serial": None,
                 "tilt": None,
