@@ -319,11 +319,14 @@ class LutronCasetaOptionsFlow(OptionsFlow):
     def __init__(self) -> None:
         """Initialize transient wizard state without changing stored options."""
         self._zone_id: str | None = None
+        self._original_config: EstimatedCoverConfig | None = None
         self._working_config: EstimatedCoverConfig | None = None
+        self._dirty = False
         self._session: OpenCloseStopSetupSession | None = None
         self._progress_task: asyncio.Task[Any] | None = None
         self._capture_action: ExternalAction | None = None
         self._capture_candidates: tuple[SetupButtonEvent, ...] = ()
+        self._pending_learn_binding: PicoBinding | None = None
         self._pending_bindings: tuple[PicoBinding, ...] | None = None
         self._verification_queue: list[PicoBinding] = []
         self._selected_keypad_serial: str | None = None
@@ -335,6 +338,8 @@ class LutronCasetaOptionsFlow(OptionsFlow):
         self._calibration_initial_complete = False
         self._open_samples: list[float] = []
         self._close_samples: list[float] = []
+        self._last_calibration_duration: float | None = None
+        self._calibration_pico_bindings: dict[ExternalAction, PicoBinding] | None = None
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
@@ -355,6 +360,7 @@ class LutronCasetaOptionsFlow(OptionsFlow):
             return self.async_abort(reason="no_available_covers")
         if user_input is not None:
             self._zone_id = user_input["zone_id"]
+            self._original_config = None
             self._working_config = EstimatedCoverConfig(
                 self._zone_id,
                 CoverDeviceClass.BLIND,
@@ -416,7 +422,9 @@ class LutronCasetaOptionsFlow(OptionsFlow):
             return self.async_abort(reason="no_configured_covers")
         if user_input is not None:
             self._zone_id = user_input["zone_id"]
-            self._working_config = configs[self._zone_id]
+            self._original_config = configs[self._zone_id]
+            self._working_config = self._original_config
+            self._dirty = False
             return await self.async_step_zone()
         return self.async_show_form(
             step_id="configure",
@@ -441,38 +449,81 @@ class LutronCasetaOptionsFlow(OptionsFlow):
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Show all operations for the selected cover."""
-        assert self._working_config is not None
+        config = self._require_working_config()
+        menu_options = [
+            "overview",
+            "standard_picos",
+            "advanced_mappings",
+            "learn_action",
+            "calibrate",
+            "manual_timing",
+        ]
+        if self._original_config is not None:
+            menu_options.append("remove")
+        if self._dirty:
+            menu_options.append("finish")
+        menu_options.append("back_to_covers")
         return self.async_show_menu(
             step_id="zone",
-            menu_options=(
-                "overview",
-                "standard_picos",
-                "advanced_mappings",
-                "learn_action",
-                "calibrate",
-                "manual_timing",
-                "remove",
-            ),
+            menu_options=menu_options,
             description_placeholders={
-                "zone": self._cover_label(self._working_config.zone_id)
+                "zone": self._cover_label(config.zone_id),
+                "status": "pending changes" if self._dirty else "saved",
+                "standard_picos": self._format_standard_picos(config.bindings),
+                "bindings": self._format_bindings(config.bindings),
             },
         )
+
+    async def async_step_finish(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Commit the selected cover once and finish the editing session."""
+        config = self._require_working_config()
+        return await self._async_save_zone(config.zone_id, config)
+
+    async def async_step_back_to_covers(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Return to cover selection, confirming before discarding edits."""
+        if self._dirty:
+            return self.async_show_menu(
+                step_id="discard_changes", menu_options=("discard_changes", "zone")
+            )
+        if self._original_config is None:
+            self._zone_id = None
+            self._working_config = None
+            return await self.async_step_add()
+        return await self.async_step_configure()
+
+    async def async_step_discard_changes(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Discard the current cover's staged changes."""
+        self._working_config = self._original_config
+        self._dirty = False
+        if self._original_config is None:
+            self._zone_id = None
+            return await self.async_step_add()
+        return await self.async_step_configure()
 
     async def async_step_overview(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Summarize timing and action bindings for one cover."""
         config = self._require_working_config()
-        if user_input is not None:
-            return await self.async_step_zone()
-        return self.async_show_form(
+        return self.async_show_menu(
             step_id="overview",
-            data_schema=vol.Schema({}),
+            menu_options=("zone",),
             description_placeholders={
                 "zone": self._cover_label(config.zone_id),
                 "open_time": str(config.travel_times.open_seconds),
                 "close_time": str(config.travel_times.close_seconds),
-                "bindings": str(len(config.bindings)),
+                "guards": (
+                    f"open {config.travel_times.open_guard_seconds}s, "
+                    f"closed {config.travel_times.close_guard_seconds}s"
+                ),
+                "standard_picos": self._format_standard_picos(config.bindings),
+                "bindings": self._format_bindings(config.bindings),
                 "source": (
                     config.calibration.source
                     if config.calibration is not None
@@ -482,6 +533,24 @@ class LutronCasetaOptionsFlow(OptionsFlow):
         )
 
     async def async_step_standard_picos(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Show standard-Pico context before editing associations."""
+        await self._async_release_setup()
+        config = self._require_working_config()
+        self._pending_bindings = None
+        self._verification_queue = []
+        return self.async_show_menu(
+            step_id="standard_picos",
+            menu_options=("standard_picos_edit", "zone"),
+            description_placeholders={
+                "zone": self._cover_label(config.zone_id),
+                "standard_picos": self._format_standard_picos(config.bindings),
+                "bindings": self._format_bindings(config.bindings),
+            },
+        )
+
+    async def async_step_standard_picos_edit(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Associate standard raise/lower Picos after physical verification."""
@@ -498,20 +567,30 @@ class LutronCasetaOptionsFlow(OptionsFlow):
                 if binding.keypad_serial not in current_standard_serials
                 or not self._is_standard_binding(binding)
             )
-            candidate = (*advanced, *standard)
-            if self._bindings_conflict(candidate):
+            candidate = list(advanced)
+            for binding in standard:
+                existing = next(
+                    (item for item in candidate if item.event_key == binding.event_key),
+                    None,
+                )
+                if existing is None or existing.effect is not binding.effect:
+                    candidate.append(binding)
+            canonical_bindings = tuple(candidate)
+            if self._bindings_conflict(canonical_bindings):
                 errors[CONF_STANDARD_PICOS] = "pico_already_assigned"
             else:
-                self._pending_bindings = candidate
+                self._pending_bindings = canonical_bindings
                 added = set(selected) - set(current_serials)
                 self._verification_queue = [
                     binding for binding in standard if binding.keypad_serial in added
                 ]
                 if not self._verification_queue:
-                    return await self._async_save_bindings(candidate)
+                    return await self._async_stage_bindings(
+                        canonical_bindings, next_step="standard_picos"
+                    )
                 return await self.async_step_verify_binding()
         return self.async_show_form(
-            step_id="standard_picos",
+            step_id="standard_picos_edit",
             data_schema=vol.Schema(
                 {
                     vol.Required(
@@ -524,7 +603,10 @@ class LutronCasetaOptionsFlow(OptionsFlow):
                 }
             ),
             errors=errors,
-            description_placeholders={"zone": self._cover_label(config.zone_id)},
+            description_placeholders={
+                "zone": self._cover_label(config.zone_id),
+                "standard_picos": self._format_standard_picos(config.bindings),
+            },
         )
 
     async def async_step_verify_binding(
@@ -532,31 +614,46 @@ class LutronCasetaOptionsFlow(OptionsFlow):
     ) -> ConfigFlowResult:
         """Prompt before moving the cover to verify one standard Pico action."""
         binding = self._verification_queue[0]
-        if user_input is not None:
-            if error := await self._async_ensure_setup():
-                return self.async_show_form(
-                    step_id="verify_binding",
-                    data_schema=self._confirmation_schema("start"),
-                    errors={"base": error},
-                    description_placeholders={
-                        "action": binding.effect,
-                        "button": binding.button_type,
-                        "pico": self._keypad_label(binding.keypad_serial),
-                    },
-                )
-            assert self._session is not None
-            self._progress_task = self.hass.async_create_task(
-                self._session.async_capture_action(binding.effect)
-            )
-            return await self.async_step_verify_binding_progress()
-        return self.async_show_form(
+        return self.async_show_menu(
             step_id="verify_binding",
-            data_schema=self._confirmation_schema("start"),
+            menu_options=("verify_binding_begin", "standard_picos"),
             description_placeholders={
                 "action": binding.effect,
                 "button": binding.button_type,
                 "pico": self._keypad_label(binding.keypad_serial),
             },
+        )
+
+    async def async_step_verify_binding_begin(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Start listening for the requested standard Pico action."""
+        binding = self._verification_queue[0]
+        if error := await self._async_ensure_setup():
+            return self.async_show_form(
+                step_id="verify_binding_error",
+                data_schema=vol.Schema({}),
+                errors={"base": error},
+                description_placeholders={
+                    "action": binding.effect,
+                    "button": binding.button_type,
+                    "pico": self._keypad_label(binding.keypad_serial),
+                },
+            )
+        assert self._session is not None
+        self._progress_task = self.hass.async_create_task(
+            self._session.async_capture_action(binding.effect)
+        )
+        return await self.async_step_verify_binding_progress()
+
+    async def async_step_verify_binding_error(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Return to verification after a setup-start failure."""
+        if user_input is not None:
+            return await self.async_step_verify_binding()
+        return self.async_show_form(
+            step_id="verify_binding_error", data_schema=vol.Schema({})
         )
 
     async def async_step_verify_binding_progress(
@@ -583,8 +680,8 @@ class LutronCasetaOptionsFlow(OptionsFlow):
         except SetupCaptureMismatch, SetupCaptureTimeout:
             self._progress_task = None
             return self.async_show_form(
-                step_id="verify_binding",
-                data_schema=self._confirmation_schema("start"),
+                step_id="verify_binding_retry",
+                data_schema=vol.Schema({}),
                 errors={"base": "verification_failed"},
                 description_placeholders={
                     "action": binding.effect,
@@ -596,8 +693,8 @@ class LutronCasetaOptionsFlow(OptionsFlow):
             _LOGGER.exception("Unable to stop cover after Pico verification")
             self._progress_task = None
             return self.async_show_form(
-                step_id="verify_binding",
-                data_schema=self._confirmation_schema("start"),
+                step_id="verify_binding_retry",
+                data_schema=vol.Schema({}),
                 errors={"base": "verification_failed"},
                 description_placeholders={
                     "action": binding.effect,
@@ -608,8 +705,8 @@ class LutronCasetaOptionsFlow(OptionsFlow):
         self._progress_task = None
         if binding.event_key not in {candidate.event_key for candidate in candidates}:
             return self.async_show_form(
-                step_id="verify_binding",
-                data_schema=self._confirmation_schema("start"),
+                step_id="verify_binding_retry",
+                data_schema=vol.Schema({}),
                 errors={"base": "verification_mismatch"},
                 description_placeholders={
                     "action": binding.effect,
@@ -621,7 +718,19 @@ class LutronCasetaOptionsFlow(OptionsFlow):
         if self._verification_queue:
             return await self.async_step_verify_binding()
         assert self._pending_bindings is not None
-        return await self._async_save_bindings(self._pending_bindings)
+        return await self._async_stage_bindings(
+            self._pending_bindings, next_step="standard_picos"
+        )
+
+    async def async_step_verify_binding_retry(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Retry a failed standard Pico verification."""
+        if user_input is not None:
+            return await self.async_step_verify_binding()
+        return self.async_show_form(
+            step_id="verify_binding_retry", data_schema=vol.Schema({})
+        )
 
     async def async_step_advanced_mappings(
         self, user_input: dict[str, Any] | None = None
@@ -689,7 +798,9 @@ class LutronCasetaOptionsFlow(OptionsFlow):
                 for position, binding in enumerate(config.bindings)
                 if position != index
             )
-            return await self._async_save_bindings(bindings)
+            return await self._async_stage_bindings(
+                bindings, next_step="advanced_mappings"
+            )
         return self.async_show_form(
             step_id="advanced_remove",
             data_schema=vol.Schema(
@@ -732,7 +843,9 @@ class LutronCasetaOptionsFlow(OptionsFlow):
             if self._bindings_conflict(tuple(bindings)):
                 errors["base"] = "binding_already_assigned"
             else:
-                return await self._async_save_bindings(tuple(bindings))
+                return await self._async_stage_bindings(
+                    tuple(bindings), next_step="advanced_mappings"
+                )
         button_field = (
             vol.Required(ATTR_LEAP_BUTTON_NUMBER, default=existing.leap_button_number)
             if existing is not None
@@ -772,57 +885,86 @@ class LutronCasetaOptionsFlow(OptionsFlow):
     async def async_step_learn_action(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Select the effect to learn from a physical interaction."""
-        if user_input is not None:
-            self._capture_action = ExternalAction(user_input["effect"])
-            return await self.async_step_learn_start()
-        return self.async_show_form(
+        """Show current mappings and offer one effect to learn."""
+        await self._async_release_setup()
+        config = self._require_working_config()
+        self._pending_learn_binding = None
+        return self.async_show_menu(
             step_id="learn_action",
-            data_schema=vol.Schema(
-                {
-                    vol.Required("effect"): selector.SelectSelector(
-                        selector.SelectSelectorConfig(
-                            options=[action.value for action in ExternalAction]
-                        )
-                    )
-                }
-            ),
+            menu_options=("learn_open", "learn_close", "learn_stop", "zone"),
+            description_placeholders={
+                "standard_picos": self._format_standard_picos(config.bindings),
+                "bindings": self._format_bindings(config.bindings),
+            },
         )
+
+    async def async_step_learn_open(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Prepare to learn an Open action."""
+        return await self._async_prepare_learn(ExternalAction.OPEN)
+
+    async def async_step_learn_close(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Prepare to learn a Close action."""
+        return await self._async_prepare_learn(ExternalAction.CLOSE)
+
+    async def async_step_learn_stop(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Prepare to learn a Stop action."""
+        return await self._async_prepare_learn(ExternalAction.STOP)
 
     async def async_step_learn_start(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Prompt before listening for a Pico action."""
         assert self._capture_action is not None
-        if user_input is not None:
-            if error := await self._async_ensure_setup():
-                return self.async_show_form(
-                    step_id="learn_start",
-                    data_schema=self._confirmation_schema("start"),
-                    errors={"base": error},
-                    description_placeholders={"action": self._capture_action},
-                )
-            assert self._session is not None
-            self._progress_task = self.hass.async_create_task(
-                self._session.async_capture_action(self._capture_action)
-            )
-            return await self.async_step_learn_progress()
-        return self.async_show_form(
+        return self.async_show_menu(
             step_id="learn_start",
-            data_schema=self._confirmation_schema("start"),
+            menu_options=("learn_begin", "learn_action"),
             description_placeholders={"action": self._capture_action},
         )
+
+    async def async_step_learn_begin(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Start listening for the selected cover action."""
+        assert self._capture_action is not None
+        if error := await self._async_ensure_setup():
+            return self.async_show_form(
+                step_id="learn_error",
+                data_schema=vol.Schema({}),
+                errors={"base": error},
+                description_placeholders={"action": self._capture_action},
+            )
+        assert self._session is not None
+        self._progress_task = self.hass.async_create_task(
+            self._session.async_capture_action(self._capture_action)
+        )
+        return await self.async_step_learn_progress()
+
+    async def async_step_learn_error(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Return to Learn after a setup-start failure."""
+        if user_input is not None:
+            return await self.async_step_learn_start()
+        return self.async_show_form(step_id="learn_error", data_schema=vol.Schema({}))
 
     async def async_step_learn_progress(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Wait for a physical button interaction."""
         assert self._progress_task is not None
+        assert self._capture_action is not None
         if not self._progress_task.done():
             return self.async_show_progress(
                 step_id="learn_progress",
-                progress_action="learn_action",
+                progress_action=f"learn_{self._capture_action}",
                 progress_task=self._progress_task,
+                description_placeholders={"action": self._capture_action.value},
             )
         return self.async_show_progress_done(next_step_id="learn_result")
 
@@ -835,32 +977,55 @@ class LutronCasetaOptionsFlow(OptionsFlow):
         try:
             self._capture_candidates = await self._progress_task
         except SetupCaptureTimeout:
+            await self._async_release_setup()
             self._progress_task = None
             return self.async_show_form(
-                step_id="learn_start",
-                data_schema=self._confirmation_schema("start"),
+                step_id="learn_retry",
+                data_schema=vol.Schema({}),
                 errors={"base": "capture_timeout"},
                 description_placeholders={"action": self._capture_action},
             )
         except SetupCaptureMismatch:
+            await self._async_release_setup()
             self._progress_task = None
             return self.async_show_form(
-                step_id="learn_start",
-                data_schema=self._confirmation_schema("start"),
+                step_id="learn_retry",
+                data_schema=vol.Schema({}),
                 errors={"base": "capture_mismatch"},
                 description_placeholders={"action": self._capture_action},
             )
         except Exception:
             _LOGGER.exception("Unable to stop cover after action capture")
+            await self._async_release_setup()
             self._progress_task = None
             return self.async_show_form(
-                step_id="learn_start",
-                data_schema=self._confirmation_schema("start"),
+                step_id="learn_retry",
+                data_schema=vol.Schema({}),
                 errors={"base": "command_failed"},
                 description_placeholders={"action": self._capture_action},
             )
         self._progress_task = None
+        await self._async_release_setup()
+        preferred = self._binding_from_event(self._capture_candidates[0])
+        if (existing := self._binding_for_event(preferred.event_key)) is not None:
+            self._pending_learn_binding = preferred
+            if existing.effect is preferred.effect:
+                return await self.async_step_learn_already_mapped()
+            return await self.async_step_learn_conflict()
+        self._capture_candidates = tuple(
+            candidate
+            for candidate in self._capture_candidates
+            if self._binding_for_event(candidate.event_key) is None
+        )
         return await self.async_step_learn_candidate()
+
+    async def async_step_learn_retry(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Retry the selected learned action."""
+        if user_input is not None:
+            return await self.async_step_learn_start()
+        return self.async_show_form(step_id="learn_retry", data_schema=vol.Schema({}))
 
     async def async_step_learn_candidate(
         self, user_input: dict[str, Any] | None = None
@@ -868,21 +1033,17 @@ class LutronCasetaOptionsFlow(OptionsFlow):
         """Let the user choose the intended gesture from captured candidates."""
         config = self._require_working_config()
         assert self._capture_action is not None
-        errors: dict[str, str] = {}
         if user_input is not None:
             event = self._capture_candidates[int(user_input["candidate"])]
-            binding = PicoBinding(
-                event.serial,
-                event.leap_button_number,
-                event.button_type,
-                event.gesture,
-                self._capture_action,
+            binding = self._binding_from_event(event)
+            if (existing := self._binding_for_event(binding.event_key)) is not None:
+                self._pending_learn_binding = binding
+                if existing.effect is binding.effect:
+                    return await self.async_step_learn_already_mapped()
+                return await self.async_step_learn_conflict()
+            return await self._async_stage_bindings(
+                (*config.bindings, binding), next_step="learn_action"
             )
-            bindings = (*config.bindings, binding)
-            if self._bindings_conflict(bindings):
-                errors["base"] = "binding_already_assigned"
-            else:
-                return await self._async_save_bindings(bindings)
         return self.async_show_form(
             step_id="learn_candidate",
             data_schema=vol.Schema(
@@ -903,79 +1064,156 @@ class LutronCasetaOptionsFlow(OptionsFlow):
                     )
                 }
             ),
-            errors=errors,
+            description_placeholders={
+                "action": self._capture_action,
+                "bindings": self._format_bindings(config.bindings),
+            },
         )
+
+    async def async_step_learn_already_mapped(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Explain that the captured action already has the requested effect."""
+        assert self._pending_learn_binding is not None
+        return self.async_show_menu(
+            step_id="learn_already_mapped",
+            menu_options=("learn_action",),
+            description_placeholders={
+                "binding": self._format_binding(self._pending_learn_binding)
+            },
+        )
+
+    async def async_step_learn_conflict(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Ask before replacing a different effect on the same Pico action."""
+        assert self._pending_learn_binding is not None
+        existing = self._binding_for_event(self._pending_learn_binding.event_key)
+        assert existing is not None
+        return self.async_show_menu(
+            step_id="learn_conflict",
+            menu_options=("learn_replace", "learn_action"),
+            description_placeholders={
+                "existing": self._format_binding(existing),
+                "replacement": self._format_binding(self._pending_learn_binding),
+            },
+        )
+
+    async def async_step_learn_replace(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Replace one existing binding after explicit confirmation."""
+        config = self._require_working_config()
+        assert self._pending_learn_binding is not None
+        replacement = self._pending_learn_binding
+        bindings = tuple(
+            replacement if binding.event_key == replacement.event_key else binding
+            for binding in config.bindings
+        )
+        return await self._async_stage_bindings(bindings, next_step="learn_action")
 
     async def async_step_calibrate(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Choose the controls used for guided calibration."""
+        """Explain and offer the available guided calibration methods."""
         config = self._require_working_config()
-        methods = {CALIBRATION_SOURCE_GUIDED_HA: "Home Assistant controls"}
+        menu_options = ["calibrate_ha"]
         if self._pico_calibration_bindings() is not None:
-            methods[CALIBRATION_SOURCE_GUIDED_PICO] = "Mapped Pico actions"
-        if user_input is not None:
-            self._calibration_method = user_input["method"]
-            if error := await self._async_ensure_setup():
-                return self.async_show_form(
-                    step_id="calibrate",
-                    data_schema=vol.Schema(
-                        {
-                            vol.Required(
-                                "method", default=self._calibration_method
-                            ): vol.In(methods)
-                        }
-                    ),
-                    errors={"base": error},
-                    description_placeholders={
-                        "zone": self._cover_label(config.zone_id)
-                    },
-                )
-            self._open_samples = []
-            self._close_samples = []
-            self._calibration_initial_complete = False
-            self._calibration_plan = [
-                (ExternalAction.CLOSE, False),
-                (ExternalAction.OPEN, True),
-                (ExternalAction.CLOSE, True),
-                (ExternalAction.OPEN, True),
-                (ExternalAction.CLOSE, True),
-            ]
-            return await self._async_advance_calibration()
-        return self.async_show_form(
+            menu_options.append("calibrate_pico")
+        menu_options.append("zone")
+        return self.async_show_menu(
             step_id="calibrate",
+            menu_options=menu_options,
+            description_placeholders={
+                "zone": self._cover_label(config.zone_id),
+            },
+        )
+
+    async def async_step_calibrate_ha(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Start a Home Assistant-controlled calibration."""
+        return await self._async_begin_calibration(CALIBRATION_SOURCE_GUIDED_HA)
+
+    async def async_step_calibrate_pico(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Choose the exact mapped Pico actions used for calibration."""
+        available = self._pico_calibration_bindings_by_effect()
+        assert all(available[action] for action in ExternalAction)
+        if user_input is not None:
+            self._calibration_pico_bindings = {
+                action: available[action][int(user_input[f"{action}_binding"])]
+                for action in ExternalAction
+            }
+            return await self._async_begin_calibration(CALIBRATION_SOURCE_GUIDED_PICO)
+        return self.async_show_form(
+            step_id="calibrate_pico",
             data_schema=vol.Schema(
                 {
-                    vol.Required(
-                        "method", default=CALIBRATION_SOURCE_GUIDED_HA
-                    ): vol.In(methods)
+                    vol.Required(f"{action}_binding", default="0"): (
+                        selector.SelectSelector(
+                            selector.SelectSelectorConfig(
+                                options=[
+                                    selector.SelectOptionDict(
+                                        value=str(index),
+                                        label=self._format_binding(binding),
+                                    )
+                                    for index, binding in enumerate(available[action])
+                                ]
+                            )
+                        )
+                    )
+                    for action in ExternalAction
                 }
             ),
-            description_placeholders={"zone": self._cover_label(config.zone_id)},
+            description_placeholders={
+                "open_binding": self._format_binding(available[ExternalAction.OPEN][0]),
+                "close_binding": self._format_binding(
+                    available[ExternalAction.CLOSE][0]
+                ),
+                "stop_binding": self._format_binding(available[ExternalAction.STOP][0]),
+            },
         )
 
     async def async_step_calibration_ha_start(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Start one HA-controlled calibration or repositioning leg."""
+        """Explain one HA-controlled calibration or positioning leg."""
+        assert self._calibration_action is not None
+        return self.async_show_menu(
+            step_id="calibration_ha_start",
+            menu_options=("calibration_ha_begin", "calibration_cancel"),
+            description_placeholders=self._calibration_placeholders(),
+        )
+
+    async def async_step_calibration_ha_begin(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Send the direction command for one HA-controlled leg."""
         assert self._session is not None
         assert self._calibration_action is not None
+        try:
+            await self._session.async_start_home_assistant_movement(
+                self._calibration_action
+            )
+        except Exception:  # noqa: BLE001 - translate bridge failures for the wizard
+            return self.async_show_form(
+                step_id="calibration_ha_error",
+                data_schema=vol.Schema({}),
+                errors={"base": "command_failed"},
+                description_placeholders=self._calibration_placeholders(),
+            )
+        return await self.async_step_calibration_ha_finish()
+
+    async def async_step_calibration_ha_error(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Return to the current HA calibration leg after a command failure."""
         if user_input is not None:
-            try:
-                await self._session.async_start_home_assistant_movement(
-                    self._calibration_action
-                )
-            except Exception:  # noqa: BLE001 - translate bridge failures for the wizard
-                return self.async_show_form(
-                    step_id="calibration_ha_start",
-                    data_schema=self._confirmation_schema("start"),
-                    errors={"base": "command_failed"},
-                )
-            return await self.async_step_calibration_ha_finish()
+            return await self.async_step_calibration_ha_start()
         return self.async_show_form(
-            step_id="calibration_ha_start",
-            data_schema=self._confirmation_schema("start"),
-            description_placeholders=self._calibration_placeholders(),
+            step_id="calibration_ha_error", data_schema=vol.Schema({})
         )
 
     async def async_step_calibration_ha_finish(
@@ -989,37 +1227,94 @@ class LutronCasetaOptionsFlow(OptionsFlow):
             except Exception:  # noqa: BLE001 - keep Stop failure inside the wizard
                 return self.async_show_form(
                     step_id="calibration_ha_finish",
-                    data_schema=self._confirmation_schema("reached_endpoint"),
+                    data_schema=vol.Schema({}),
                     errors={"base": "stop_failed"},
+                    description_placeholders=self._calibration_placeholders(),
                 )
-            self._record_calibration_leg(duration)
-            return await self._async_advance_calibration()
+            return await self._async_complete_calibration_leg(duration)
         return self.async_show_form(
             step_id="calibration_ha_finish",
-            data_schema=self._confirmation_schema("reached_endpoint"),
+            data_schema=vol.Schema({}),
             description_placeholders=self._calibration_placeholders(),
+        )
+
+    async def async_step_calibration_pico_positioning(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Explain an unmeasured Pico positioning leg."""
+        return self.async_show_menu(
+            step_id="calibration_pico_positioning",
+            menu_options=(
+                "calibration_pico_listen",
+                "calibration_pico_at_endpoint",
+                "calibration_cancel",
+            ),
+            description_placeholders=self._calibration_placeholders(),
+        )
+
+    async def async_step_calibration_pico_sample(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Explain one measured Pico calibration leg."""
+        return self.async_show_menu(
+            step_id="calibration_pico_sample",
+            menu_options=("calibration_pico_listen", "calibration_cancel"),
+            description_placeholders=self._calibration_placeholders(),
+        )
+
+    async def async_step_calibration_pico_listen(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Start listening for the selected Pico direction and Stop actions."""
+        assert self._session is not None
+        assert self._calibration_action is not None
+        assert self._calibration_pico_bindings is not None
+        direction = self._calibration_pico_bindings[self._calibration_action]
+        stop = self._calibration_pico_bindings[ExternalAction.STOP]
+        self._progress_task = self.hass.async_create_task(
+            self._session.async_measure_pico_movement(
+                direction.event_key, stop.event_key
+            )
+        )
+        return await self.async_step_calibration_pico_progress()
+
+    async def async_step_calibration_pico_at_endpoint(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Accept a visible endpoint for an unmeasured positioning leg."""
+        assert not self._calibration_counted
+        assert self._session is not None
+        try:
+            await self._session.async_confirm_stationary_endpoint()
+        except Exception:  # noqa: BLE001 - translate bridge failures for the wizard
+            return self.async_show_form(
+                step_id="calibration_pico_endpoint_error",
+                data_schema=vol.Schema({}),
+                errors={"base": "stop_failed"},
+                description_placeholders=self._calibration_placeholders(),
+            )
+        return await self._async_complete_calibration_leg(None)
+
+    async def async_step_calibration_pico_endpoint_error(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Return to positioning after an endpoint safety Stop failure."""
+        if user_input is not None:
+            return await self.async_step_calibration_pico_positioning()
+        return self.async_show_form(
+            step_id="calibration_pico_endpoint_error", data_schema=vol.Schema({})
         )
 
     async def async_step_calibration_pico_progress(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Wait for mapped Pico direction and Stop actions."""
-        assert self._session is not None
         assert self._calibration_action is not None
-        bindings = self._pico_calibration_bindings()
-        assert bindings is not None
-        if self._progress_task is None:
-            direction = bindings[self._calibration_action]
-            stop = bindings[ExternalAction.STOP]
-            self._progress_task = self.hass.async_create_task(
-                self._session.async_measure_pico_movement(
-                    direction.event_key, stop.event_key
-                )
-            )
+        assert self._progress_task is not None
         if not self._progress_task.done():
             return self.async_show_progress(
                 step_id="calibration_pico_progress",
-                progress_action="calibrate_pico",
+                progress_action=self._calibration_progress_action(),
                 progress_task=self._progress_task,
                 description_placeholders=self._calibration_placeholders(),
             )
@@ -1036,25 +1331,52 @@ class LutronCasetaOptionsFlow(OptionsFlow):
             self._progress_task = None
             return self.async_show_form(
                 step_id="calibration_pico_retry",
-                data_schema=self._confirmation_schema("retry"),
+                data_schema=vol.Schema({}),
                 errors={"base": "calibration_capture_failed"},
                 description_placeholders=self._calibration_placeholders(),
             )
         self._progress_task = None
-        self._record_calibration_leg(duration)
-        return await self._async_advance_calibration()
+        return await self._async_complete_calibration_leg(duration)
 
     async def async_step_calibration_pico_retry(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Retry an incomplete Pico calibration leg."""
         if user_input is not None:
-            return await self.async_step_calibration_pico_progress()
+            return await self._async_show_current_pico_leg()
         return self.async_show_form(
             step_id="calibration_pico_retry",
-            data_schema=self._confirmation_schema("retry"),
+            data_schema=vol.Schema({}),
             description_placeholders=self._calibration_placeholders(),
         )
+
+    async def async_step_calibration_leg_complete(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Show the result of one leg before advancing."""
+        if user_input is not None:
+            return await self._async_advance_calibration()
+        placeholders = self._calibration_placeholders()
+        placeholders["duration"] = (
+            f"{self._last_calibration_duration:.2f}s"
+            if self._last_calibration_duration is not None
+            else "not measured"
+        )
+        return self.async_show_form(
+            step_id="calibration_leg_complete",
+            data_schema=vol.Schema({}),
+            description_placeholders=placeholders,
+        )
+
+    async def async_step_calibration_cancel(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Stop calibration safely and return to method selection."""
+        await self._async_release_setup()
+        self._calibration_plan = []
+        self._open_samples = []
+        self._close_samples = []
+        return await self.async_step_calibrate()
 
     async def async_step_calibration_summary(
         self, user_input: dict[str, Any] | None = None
@@ -1067,8 +1389,8 @@ class LutronCasetaOptionsFlow(OptionsFlow):
             calibrated = replace(
                 config,
                 travel_times=TravelTimes(
-                    open_result.seconds,
-                    close_result.seconds,
+                    user_input[CONF_OPEN_TRAVEL_SECONDS],
+                    user_input[CONF_CLOSE_TRAVEL_SECONDS],
                     user_input[CONF_OPEN_GUARD_SECONDS],
                     user_input[CONF_CLOSE_GUARD_SECONDS],
                 ),
@@ -1078,11 +1400,19 @@ class LutronCasetaOptionsFlow(OptionsFlow):
                     tuple(round(sample, 2) for sample in self._close_samples),
                 ),
             )
-            return await self._async_save_zone(config.zone_id, calibrated)
+            return await self._async_stage_config(calibrated, next_step="zone")
         return self.async_show_form(
             step_id="calibration_summary",
             data_schema=vol.Schema(
                 {
+                    vol.Required(
+                        CONF_OPEN_TRAVEL_SECONDS,
+                        default=open_result.seconds,
+                    ): self._travel_selector(),
+                    vol.Required(
+                        CONF_CLOSE_TRAVEL_SECONDS,
+                        default=close_result.seconds,
+                    ): self._travel_selector(),
                     vol.Required(
                         CONF_OPEN_GUARD_SECONDS,
                         default=config.travel_times.open_guard_seconds,
@@ -1120,7 +1450,7 @@ class LutronCasetaOptionsFlow(OptionsFlow):
                 ),
                 calibration=CalibrationMetadata(CALIBRATION_SOURCE_MANUAL),
             )
-            return await self._async_save_zone(config.zone_id, manual)
+            return await self._async_stage_config(manual, next_step="zone")
         return self.async_show_form(
             step_id="manual_timing",
             data_schema=vol.Schema(
@@ -1168,7 +1498,7 @@ class LutronCasetaOptionsFlow(OptionsFlow):
             return await self._async_save_zone(config.zone_id, None)
         return self.async_show_form(
             step_id="remove",
-            data_schema=self._confirmation_schema("remove"),
+            data_schema=vol.Schema({}),
             description_placeholders={"zone": self._cover_label(config.zone_id)},
         )
 
@@ -1192,7 +1522,7 @@ class LutronCasetaOptionsFlow(OptionsFlow):
             self._calibration_plan.pop(0)
         )
         if self._calibration_method == CALIBRATION_SOURCE_GUIDED_PICO:
-            return await self.async_step_calibration_pico_progress()
+            return await self._async_show_current_pico_leg()
         return await self.async_step_calibration_ha_start()
 
     def _record_calibration_leg(self, duration: float) -> None:
@@ -1214,11 +1544,89 @@ class LutronCasetaOptionsFlow(OptionsFlow):
             return True
         return False
 
-    async def _async_save_bindings(
-        self, bindings: tuple[PicoBinding, ...]
+    async def _async_stage_bindings(
+        self,
+        bindings: tuple[PicoBinding, ...],
+        *,
+        next_step: str,
     ) -> ConfigFlowResult:
+        """Stage canonical bindings and return to their owning screen."""
+        if self._bindings_conflict(bindings):
+            await self._async_release_setup()
+            return self.async_show_menu(
+                step_id="binding_conflict", menu_options=("zone",)
+            )
         config = replace(self._require_working_config(), bindings=bindings)
-        return await self._async_save_zone(config.zone_id, config)
+        return await self._async_stage_config(config, next_step=next_step)
+
+    async def _async_stage_config(
+        self, config: EstimatedCoverConfig, *, next_step: str
+    ) -> ConfigFlowResult:
+        """Keep edits local until the user explicitly saves the cover."""
+        await self._async_release_setup()
+        self._working_config = config
+        self._dirty = self._original_config is None or config != self._original_config
+        return await getattr(self, f"async_step_{next_step}")()
+
+    async def _async_prepare_learn(self, action: ExternalAction) -> ConfigFlowResult:
+        """Reset capture state and explain the selected learning operation."""
+        self._capture_action = action
+        self._capture_candidates = ()
+        self._pending_learn_binding = None
+        return await self.async_step_learn_start()
+
+    async def _async_begin_calibration(self, method: str) -> ConfigFlowResult:
+        """Start one safe calibration session and its deterministic sequence."""
+        if error := await self._async_ensure_setup():
+            return self.async_show_form(
+                step_id="calibration_start_error",
+                data_schema=vol.Schema({}),
+                errors={"base": error},
+            )
+        self._calibration_method = method
+        self._calibration_plan = [
+            (ExternalAction.CLOSE, False),
+            (ExternalAction.OPEN, True),
+            (ExternalAction.CLOSE, True),
+            (ExternalAction.OPEN, True),
+            (ExternalAction.CLOSE, True),
+        ]
+        self._calibration_action = None
+        self._calibration_counted = False
+        self._calibration_initial_complete = False
+        self._open_samples = []
+        self._close_samples = []
+        self._last_calibration_duration = None
+        return await self._async_advance_calibration()
+
+    async def async_step_calibration_start_error(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Return to calibration choices after setup could not start."""
+        if user_input is not None:
+            return await self.async_step_calibrate()
+        return self.async_show_form(
+            step_id="calibration_start_error", data_schema=vol.Schema({})
+        )
+
+    async def _async_complete_calibration_leg(
+        self, duration: float | None
+    ) -> ConfigFlowResult:
+        """Record a measured leg, then let the user review it before continuing."""
+        if self._calibration_counted:
+            if duration is None or duration <= 0:
+                raise ValueError("a measured calibration leg needs a duration")
+            self._record_calibration_leg(duration)
+            self._last_calibration_duration = duration
+        else:
+            self._last_calibration_duration = None
+        return await self.async_step_calibration_leg_complete()
+
+    async def _async_show_current_pico_leg(self) -> ConfigFlowResult:
+        """Explain the current Pico leg before Home Assistant listens."""
+        if self._calibration_counted:
+            return await self.async_step_calibration_pico_sample()
+        return await self.async_step_calibration_pico_positioning()
 
     async def _async_save_zone(
         self, zone_id: str, config: EstimatedCoverConfig | None
@@ -1283,6 +1691,30 @@ class LutronCasetaOptionsFlow(OptionsFlow):
             return by_effect
         return None
 
+    def _pico_calibration_bindings_by_effect(
+        self,
+    ) -> dict[ExternalAction, tuple[PicoBinding, ...]]:
+        """Group every canonical mapping by its cover effect."""
+        config = self._require_working_config()
+        return {
+            action: tuple(
+                binding for binding in config.bindings if binding.effect is action
+            )
+            for action in ExternalAction
+        }
+
+    def _calibration_progress_action(self) -> str:
+        """Return a translated progress key specific to the active Pico leg."""
+        assert self._calibration_action is not None
+        if not self._calibration_counted:
+            return f"calibrate_pico_position_{self._calibration_action}"
+        samples = (
+            self._open_samples
+            if self._calibration_action is ExternalAction.OPEN
+            else self._close_samples
+        )
+        return f"calibrate_pico_{self._calibration_action}_{len(samples) + 1}"
+
     def _calibration_placeholders(self) -> dict[str, str]:
         assert self._calibration_action is not None
         samples = (
@@ -1290,11 +1722,78 @@ class LutronCasetaOptionsFlow(OptionsFlow):
             if self._calibration_action is ExternalAction.OPEN
             else self._close_samples
         )
-        return {
-            "action": self._calibration_action,
-            "purpose": "sample" if self._calibration_counted else "positioning",
-            "sample": str(len(samples) + 1 if self._calibration_counted else 0),
+        action = self._calibration_action
+        sample = len(samples) + 1 if self._calibration_counted else 0
+        placeholders = {
+            "action": action.value,
+            "direction": "opening" if action is ExternalAction.OPEN else "closing",
+            "endpoint": "fully open"
+            if action is ExternalAction.OPEN
+            else "fully closed",
+            "purpose": "measured sample"
+            if self._calibration_counted
+            else "positioning",
+            "sample": str(sample),
+            "step": (
+                f"{action.value.title()} sample {sample}"
+                if self._calibration_counted
+                else f"Establish the {action.value} endpoint"
+            ),
         }
+        if self._calibration_pico_bindings is not None:
+            placeholders.update(
+                {
+                    "direction_binding": self._format_binding(
+                        self._calibration_pico_bindings[action]
+                    ),
+                    "stop_binding": self._format_binding(
+                        self._calibration_pico_bindings[ExternalAction.STOP]
+                    ),
+                }
+            )
+        return placeholders
+
+    def _binding_from_event(self, event: SetupButtonEvent) -> PicoBinding:
+        """Normalize a captured event to the same representation as every editor."""
+        assert self._capture_action is not None
+        return PicoBinding(
+            event.serial,
+            event.leap_button_number,
+            event.button_type,
+            event.gesture,
+            self._capture_action,
+        )
+
+    def _binding_for_event(self, event_key: tuple[str, int, str]) -> PicoBinding | None:
+        """Find the current cover binding for one stable Pico action."""
+        return next(
+            (
+                binding
+                for binding in self._require_working_config().bindings
+                if binding.event_key == event_key
+            ),
+            None,
+        )
+
+    def _format_binding(self, binding: PicoBinding) -> str:
+        """Return a readable canonical action mapping for UI context."""
+        return (
+            f"{self._keypad_label(binding.keypad_serial)} — "
+            f"{binding.button_type} {binding.gesture} → {binding.effect.value}"
+        )
+
+    def _format_bindings(self, bindings: tuple[PicoBinding, ...]) -> str:
+        """List current mappings without hiding how they were created."""
+        if not bindings:
+            return "No actions mapped"
+        return "; ".join(self._format_binding(binding) for binding in bindings)
+
+    def _format_standard_picos(self, bindings: tuple[PicoBinding, ...]) -> str:
+        """List Picos whose canonical triplet forms a standard mapping."""
+        serials = self._standard_pico_serials(bindings)
+        if not serials:
+            return "None"
+        return ", ".join(self._keypad_label(serial) for serial in serials)
 
     def _require_working_config(self) -> EstimatedCoverConfig:
         assert self._working_config is not None
@@ -1389,14 +1888,6 @@ class LutronCasetaOptionsFlow(OptionsFlow):
             )
             for index, binding in enumerate(bindings)
         ]
-
-    @staticmethod
-    def _confirmation_schema(field: str) -> vol.Schema:
-        return vol.Schema(
-            {
-                vol.Required(field, default=False): selector.BooleanSelector(),
-            }
-        )
 
     @staticmethod
     def _travel_selector() -> selector.NumberSelector:

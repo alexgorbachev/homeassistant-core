@@ -229,6 +229,21 @@ async def test_home_assistant_measurement_and_watchdog(setup_session) -> None:
     assert stop_cover.await_count == 2
 
 
+async def test_confirm_stationary_endpoint_sends_only_safety_stop(
+    setup_session,
+) -> None:
+    """Accept a visibly reached positioning endpoint without requiring movement."""
+    session, _, raise_cover, lower_cover, stop_cover = setup_session
+
+    await session.async_confirm_stationary_endpoint()
+
+    raise_cover.assert_not_awaited()
+    lower_cover.assert_not_awaited()
+    stop_cover.assert_awaited_once_with()
+    assert session.diagnostics["operation_active"] is False
+    assert session.diagnostics["last_operation"] == "confirm_stationary_endpoint"
+
+
 async def test_cancel_during_home_assistant_movement_stops_for_safety(
     setup_session,
 ) -> None:
