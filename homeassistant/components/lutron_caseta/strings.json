@@ -208,7 +208,7 @@
       "calibration_ha_finish": {
         "description": "The cover is {direction}. The moment it is {endpoint}, select **Stop now** immediately. This reaction time is part of the measurement, so prompt timing improves the estimate. Step: {step}.",
         "submit": "Stop now",
-        "title": "Cover is {direction}"
+        "title": "Stop at the endpoint"
       },
       "calibration_ha_start": {
         "description": "When you select **Start movement**, Home Assistant will begin {direction} the cover and immediately show a Stop screen. Watch the cover and select Stop the moment it is {endpoint}. Step: {step}.",
@@ -216,7 +216,7 @@
           "calibration_cancel": "Cancel calibration safely",
           "calibration_ha_begin": "Start movement"
         },
-        "title": "{step}"
+        "title": "Prepare the next movement"
       },
       "calibration_leg_complete": {
         "description": "{step} is complete. Recorded duration: {duration}. Continue when you are ready for the next instruction.",
@@ -245,7 +245,7 @@
       },
       "calibration_pico_progress": {
         "description": "Home Assistant is listening for {direction_binding}, the corresponding motor-zone update, and then {stop_binding}. Press Stop immediately when the cover is {endpoint}.",
-        "title": "{step}"
+        "title": "Listening for calibration movement"
       },
       "calibration_pico_retry": {
         "description": "The expected sequence was not completed for {step}. Review the selected direction and Stop actions, then retry. Home Assistant sends Stop whenever it believes the motor may still be moving.",
@@ -258,7 +258,7 @@
           "calibration_cancel": "Cancel calibration safely",
           "calibration_pico_listen": "Listen for {step}"
         },
-        "title": "{step}"
+        "title": "Prepare the next Pico movement"
       },
       "calibration_start_error": {
         "description": "Home Assistant could not reserve a safe setup session. No motor command was sent and no timing was changed.",
@@ -348,7 +348,7 @@
       },
       "learn_progress": {
         "description": "Perform the intended gesture now. Open and Close are accepted only when the target motor-zone update is correlated, then Home Assistant sends a safety Stop. Stop cannot be confirmed by a motor-zone event and is offered after the button events become quiet.",
-        "title": "Listening for {action}"
+        "title": "Listening for an action"
       },
       "learn_replace": {
         "title": "Replace mapping"
@@ -364,7 +364,7 @@
           "learn_action": "Back to learned actions",
           "learn_begin": "Begin listening"
         },
-        "title": "Learn {action}"
+        "title": "Learn an action"
       },
       "manual_timing": {
         "data": {
