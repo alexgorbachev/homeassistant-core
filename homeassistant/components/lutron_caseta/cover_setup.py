@@ -193,6 +193,15 @@ class OpenCloseStopSetupSession:
         self._end_operation()
         return duration
 
+    async def async_confirm_stationary_endpoint(self) -> None:
+        """Safety-Stop after the user confirms an unmeasured endpoint visually."""
+        self._begin_operation("confirm_stationary_endpoint")
+        self._drain_events()
+        try:
+            await self._async_stop()
+        finally:
+            self._end_operation()
+
     async def async_measure_pico_movement(
         self,
         direction: PicoEventKey,
