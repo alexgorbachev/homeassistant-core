@@ -1,6 +1,7 @@
 """Config flow for Lutron Caseta."""
 
 import asyncio
+from collections.abc import Mapping
 from dataclasses import replace
 import logging
 import os
@@ -485,6 +486,12 @@ class LutronCasetaOptionsFlow(OptionsFlow):
         """Commit the selected cover once and finish the editing session."""
         config = self._require_working_config()
         return await self._async_save_zone(config.zone_id, config)
+
+    async def async_step_save_conflict(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Return staged changes for review after a concurrent binding conflict."""
+        return self.async_show_menu(step_id="save_conflict", menu_options=("zone",))
 
     async def async_step_back_to_covers(
         self, user_input: dict[str, Any] | None = None
@@ -1674,6 +1681,10 @@ class LutronCasetaOptionsFlow(OptionsFlow):
         """Persist one zone atomically while preserving unrelated options."""
         await self._async_release_setup()
         options = dict(self.config_entry.options)
+        if config is not None and self._bindings_conflict(
+            config.bindings, options=options
+        ):
+            return await self.async_step_save_conflict()
         raw_covers = options.get(CONF_ESTIMATED_COVERS, {})
         covers = dict(raw_covers) if isinstance(raw_covers, dict) else {}
         if config is None:
@@ -1707,14 +1718,19 @@ class LutronCasetaOptionsFlow(OptionsFlow):
             session
         )
 
-    def _bindings_conflict(self, bindings: tuple[PicoBinding, ...]) -> bool:
+    def _bindings_conflict(
+        self,
+        bindings: tuple[PicoBinding, ...],
+        *,
+        options: Mapping[str, Any] | None = None,
+    ) -> bool:
         keys = [binding.event_key for binding in bindings]
         if len(set(keys)) != len(keys):
             return True
         claimed = {
             binding.event_key
             for zone_id, config in parse_estimated_cover_configs(
-                self.config_entry.options
+                options if options is not None else self.config_entry.options
             ).items()
             if zone_id != self._zone_id
             for binding in config.bindings

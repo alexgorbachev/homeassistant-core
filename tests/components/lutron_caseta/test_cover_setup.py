@@ -75,6 +75,15 @@ class FakeTime:
         await asyncio.sleep(0)
 
 
+type SetupSessionFixture = tuple[
+    OpenCloseStopSetupSession,
+    FakeTime,
+    AsyncMock,
+    AsyncMock,
+    AsyncMock,
+]
+
+
 async def _advance_until_done(
     fake_time: FakeTime, task: asyncio.Task, *, step: float = 0.5, limit: int = 20
 ) -> None:
@@ -262,6 +271,21 @@ async def test_cancel_during_home_assistant_movement_stops_for_safety(
     assert session.diagnostics["may_be_moving"] is False
 
 
+async def test_cancel_stop_failure_remains_visible(
+    setup_session: SetupSessionFixture, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Retain uncertainty and a redacted reason when cleanup Stop fails."""
+    session, _, _, _, stop_cover = setup_session
+    stop_cover.side_effect = OSError("processor disconnected")
+    await session.async_start_home_assistant_movement(ExternalAction.OPEN)
+
+    await session.async_cancel()
+
+    assert session.diagnostics["may_be_moving"] is True
+    assert session.diagnostics["last_failure_reason"] == "stop_command_failed"
+    assert "Failed to stop OpenCloseStop cover during setup cleanup" in caplog.text
+
+
 async def test_failed_home_assistant_start_attempts_stop(setup_session) -> None:
     """Attempt Stop because a failed command may still have reached Lutron."""
     session, _, raise_cover, _, stop_cover = setup_session
@@ -416,4 +440,24 @@ async def test_manager_exclusively_routes_setup_events(hass: HomeAssistant) -> N
     manager.ensure_commands_allowed("805")
 
     remove_engine()
+    await manager.async_shutdown()
+
+
+async def test_manager_retains_cleanup_stop_failure(hass: HomeAssistant) -> None:
+    """Keep cleanup uncertainty visible after the setup session is released."""
+    bridge = MockBridge()
+    bridge.raise_cover = AsyncMock()
+    bridge.stop_cover = AsyncMock(side_effect=OSError("processor disconnected"))
+    config = EstimatedCoverConfig(
+        "805", CoverDeviceClass.BLIND, TravelTimes(9.8, 9.3, 1, 1), ()
+    )
+    manager = OpenCloseStopManager(hass, bridge, {"805": config})
+    session = await manager.async_begin_setup("805")
+    await session.async_start_home_assistant_movement(ExternalAction.OPEN)
+
+    await manager.async_end_setup(session)
+
+    diagnostics = manager.diagnostics()
+    assert diagnostics["setup_session"] is None
+    assert diagnostics["last_setup_failure_reason"] == "stop_command_failed"
     await manager.async_shutdown()

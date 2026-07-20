@@ -29,6 +29,7 @@ from homeassistant.components.lutron_caseta.const import (
     CONF_OPEN_GUARD_SECONDS,
     CONF_OPEN_TRAVEL_SECONDS,
     CONF_STANDARD_PICOS,
+    DEVICE_TYPE_OPEN_CLOSE_STOP,
     ERROR_CANNOT_CONNECT,
     STEP_IMPORT_FAILED,
 )
@@ -66,6 +67,22 @@ MOCK_ASYNC_PAIR_SUCCESS = {
     PAIR_CERT: "mock_cert",
     PAIR_CA: "mock_ca",
 }
+
+
+class TwoOpenCloseStopMockBridge(MockBridge):
+    """Expose two generic OpenCloseStop zones for concurrent editor tests."""
+
+    def load_devices(self) -> dict[str, dict]:
+        """Add a second generic motor zone."""
+        devices = super().load_devices()
+        devices["806"] = {
+            **devices["805"],
+            "device_id": "806",
+            "zone": "806",
+            "name": "Dining Room_Motorized Window Treatment",
+            "type": DEVICE_TYPE_OPEN_CLOSE_STOP,
+        }
+        return devices
 
 
 async def test_bridge_import_flow(hass: HomeAssistant) -> None:
@@ -454,6 +471,35 @@ async def _async_finish_cover_options(
         )
         await hass.async_block_till_done()
     return result
+
+
+async def _async_stage_advanced_binding(
+    hass: HomeAssistant,
+    entry: MockConfigEntry,
+    zone_id: str,
+) -> ConfigFlowResult:
+    """Stage the same generic advanced mapping for one cover editor."""
+    result = await _async_start_cover_options(hass, entry, zone_id)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"next_step_id": "advanced_mappings"}
+    )
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"next_step_id": "advanced_add"}
+    )
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"keypad_serial": "66286451"}
+    )
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"],
+        {
+            ATTR_LEAP_BUTTON_NUMBER: "3",
+            "gesture": ACTION_MULTITAP,
+            "effect": ExternalAction.OPEN,
+        },
+    )
+    return await hass.config_entries.options.async_configure(
+        result["flow_id"], {"next_step_id": "zone"}
+    )
 
 
 async def _async_resolve_progress(
@@ -1312,6 +1358,42 @@ async def test_simultaneous_setup_flows_are_rejected(hass: HomeAssistant) -> Non
         entry.runtime_data.open_close_stop_manager.diagnostics()["setup_session"]
         is None
     )
+
+
+async def test_concurrent_editors_revalidate_bindings_when_saving(
+    hass: HomeAssistant,
+) -> None:
+    """Reject a Pico action claimed after another editor staged its changes."""
+    cover = {
+        CONF_DEVICE_CLASS: "blind",
+        CONF_OPEN_TRAVEL_SECONDS: 9.8,
+        CONF_CLOSE_TRAVEL_SECONDS: 9.3,
+        CONF_OPEN_GUARD_SECONDS: 1.0,
+        CONF_CLOSE_GUARD_SECONDS: 1.0,
+        CONF_BINDINGS: [],
+    }
+    options = {CONF_ESTIMATED_COVERS: {"805": cover, "806": dict(cover)}}
+    entry = await async_setup_integration(
+        hass, TwoOpenCloseStopMockBridge, options=options
+    )
+
+    first = await _async_stage_advanced_binding(hass, entry, "805")
+    second = await _async_stage_advanced_binding(hass, entry, "806")
+    first = await _async_finish_cover_options(hass, first)
+    second = await _async_finish_cover_options(hass, second)
+
+    assert first["type"] is FlowResultType.CREATE_ENTRY
+    assert second["type"] is FlowResultType.MENU
+    assert second["step_id"] == "save_conflict"
+    assert entry.options[CONF_ESTIMATED_COVERS]["806"][CONF_BINDINGS] == []
+
+    second = await hass.config_entries.options.async_configure(
+        second["flow_id"], {"next_step_id": "zone"}
+    )
+    assert second["step_id"] == "zone"
+    assert "pending changes" in second["description_placeholders"]["status"]
+
+    hass.config_entries.options.async_abort(second["flow_id"])
 
 
 async def test_zeroconf_host_already_configured(
