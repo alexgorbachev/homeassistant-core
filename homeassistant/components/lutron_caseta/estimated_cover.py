@@ -347,6 +347,7 @@ class OpenCloseStopManager:
             self._handle_zone_event
         )
         self._setup_session: OpenCloseStopSetupSession | None = None
+        self._last_setup_failure_reason: str | None = None
         self._closed = False
 
     def config_for_zone(self, zone_id: str | None) -> EstimatedCoverConfig | None:
@@ -373,6 +374,7 @@ class OpenCloseStopManager:
             raise SetupSessionBusyError("integration is shutting down")
         if self._setup_session is not None:
             raise SetupSessionBusyError("another cover setup is already active")
+        self._last_setup_failure_reason = None
         device = self._bridge.get_device_by_zone_id(zone_id)
         session = OpenCloseStopSetupSession(
             zone_id,
@@ -385,8 +387,7 @@ class OpenCloseStopManager:
             if (engine := self._engines.get(zone_id)) is not None:
                 await engine.async_suspend_for_setup()
         except Exception:
-            self._setup_session = None
-            await session.async_cancel()
+            await self.async_end_setup(session)
             raise
         return session
 
@@ -397,6 +398,8 @@ class OpenCloseStopManager:
         try:
             await session.async_cancel()
         finally:
+            if session.last_failure_reason is not None:
+                self._last_setup_failure_reason = session.last_failure_reason.value
             if self._setup_session is session:
                 self._setup_session = None
 
@@ -454,6 +457,7 @@ class OpenCloseStopManager:
                 if self._setup_session is not None
                 else None
             ),
+            "last_setup_failure_reason": self._last_setup_failure_reason,
         }
 
     @callback

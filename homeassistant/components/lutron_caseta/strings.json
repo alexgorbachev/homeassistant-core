@@ -415,6 +415,13 @@
         "submit": "Remove estimation",
         "title": "Remove estimated-position support"
       },
+      "save_conflict": {
+        "description": "Another options flow assigned one of these Pico button gestures while this cover was being edited. Your staged changes were not saved. Review the mappings and resolve the conflict before saving again.",
+        "menu_options": {
+          "zone": "Return to this cover"
+        },
+        "title": "Pico mapping changed elsewhere"
+      },
       "standard_picos": {
         "description": "Standard Picos use raise for Open, lower for Close, and favorite for Stop. Current standard Picos: {standard_picos}. All current canonical mappings: {bindings}.",
         "menu_options": {

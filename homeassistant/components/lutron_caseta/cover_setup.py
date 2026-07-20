@@ -5,11 +5,14 @@ from collections.abc import Awaitable, Callable, Collection, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from enum import StrEnum
+import logging
 from statistics import mean, median
 import time
 from typing import Any
 
 from .cover_estimator import ExternalAction
+
+_LOGGER = logging.getLogger(__name__)
 
 EXPECTED_ZONE_EVENT_SECONDS = 2.0
 ZONE_EVENT_GRACE_SECONDS = 0.25
@@ -37,6 +40,7 @@ class SetupCaptureFailureReason(StrEnum):
     CONTROLLER_RECONNECTED = "controller_reconnected"
     DIRECTION_NOT_DETECTED = "direction_not_detected"
     STOP_NOT_DETECTED = "stop_not_detected"
+    STOP_COMMAND_FAILED = "stop_command_failed"
     UNEXPECTED_ZONE_ACTIVITY = "unexpected_zone_activity"
     ZONE_NOT_DETECTED = "zone_not_detected"
 
@@ -155,6 +159,11 @@ class OpenCloseStopSetupSession:
                 else None
             ),
         }
+
+    @property
+    def last_failure_reason(self) -> SetupCaptureFailureReason | None:
+        """Return the latest redacted failure category."""
+        return self._last_failure_reason
 
     def receive_button(self, event: SetupButtonEvent) -> None:
         """Queue one normalized Pico or keypad event."""
@@ -496,8 +505,9 @@ class OpenCloseStopSetupSession:
     async def _async_stop_safely(self) -> None:
         try:
             await self._async_stop()
-        except Exception:  # noqa: BLE001 - cleanup must not mask the original failure
-            self._may_be_moving = False
+        except Exception:
+            self._last_failure_reason = SetupCaptureFailureReason.STOP_COMMAND_FAILED
+            _LOGGER.exception("Failed to stop OpenCloseStop cover during setup cleanup")
 
     async def _async_cancel_watchdog(self) -> None:
         if self._watchdog is None:

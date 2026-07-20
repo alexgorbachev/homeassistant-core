@@ -284,7 +284,11 @@ async def test_diagnostics(
                 },
             },
         },
-        "open_close_stop": {"covers": {}, "setup_session": None},
+        "open_close_stop": {
+            "covers": {},
+            "last_setup_failure_reason": None,
+            "setup_session": None,
+        },
     }
 
 
