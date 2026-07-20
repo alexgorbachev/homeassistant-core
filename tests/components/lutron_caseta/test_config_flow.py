@@ -33,7 +33,11 @@ from homeassistant.components.lutron_caseta.const import (
     STEP_IMPORT_FAILED,
 )
 from homeassistant.components.lutron_caseta.cover_estimator import ExternalAction
-from homeassistant.components.lutron_caseta.cover_setup import SetupButtonEvent
+from homeassistant.components.lutron_caseta.cover_setup import (
+    SetupButtonEvent,
+    SetupCaptureFailureReason,
+    SetupCaptureTimeout,
+)
 from homeassistant.components.lutron_caseta.estimated_cover import (
     standard_pico_bindings,
 )
@@ -945,7 +949,6 @@ async def test_guided_home_assistant_calibration_options_flow(
     entry = await async_setup_integration(hass, MockBridge, options=options)
     session = AsyncMock()
     session.async_finish_home_assistant_movement.side_effect = [
-        1.0,
         9.8,
         9.3,
         9.9,
@@ -963,16 +966,54 @@ async def test_guided_home_assistant_calibration_options_flow(
         result = await hass.config_entries.options.async_configure(
             result["flow_id"], {"next_step_id": "calibrate_ha"}
         )
-        for _ in range(5):
+        assert result["step_id"] == "calibration_ha_start"
+        assert (
+            result["description_placeholders"]["step"] == "Establish the close endpoint"
+        )
+        assert (
+            result["description_placeholders"]["timing_guidance"]
+            == "This only establishes the starting endpoint; no duration will be "
+            "recorded."
+        )
+        assert result["menu_options"] == [
+            "calibration_ha_begin",
+            "calibration_ha_at_endpoint",
+            "calibration_cancel",
+        ]
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], {"next_step_id": "calibration_ha_at_endpoint"}
+        )
+        assert result["step_id"] == "calibration_positioning_complete"
+        assert result["description_placeholders"] == {
+            "endpoint": "fully closed",
+            "next_step": "Open sample 1",
+        }
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], {}
+        )
+
+        for step in (
+            "Open sample 1",
+            "Close sample 1",
+            "Open sample 2",
+            "Close sample 2",
+        ):
             assert result["step_id"] == "calibration_ha_start"
+            assert result["description_placeholders"]["step"] == step
+            assert result["menu_options"] == [
+                "calibration_ha_begin",
+                "calibration_cancel",
+            ]
             result = await hass.config_entries.options.async_configure(
                 result["flow_id"], {"next_step_id": "calibration_ha_begin"}
             )
             assert result["step_id"] == "calibration_ha_finish"
+            assert result["description_placeholders"]["step"] == step
             result = await hass.config_entries.options.async_configure(
                 result["flow_id"], {}
             )
             assert result["step_id"] == "calibration_leg_complete"
+            assert result["description_placeholders"]["step"] == step
             result = await hass.config_entries.options.async_configure(
                 result["flow_id"], {}
             )
@@ -995,6 +1036,7 @@ async def test_guided_home_assistant_calibration_options_flow(
     assert cover[CONF_CLOSE_TRAVEL_SECONDS] == 9.4
     assert cover[CONF_OPEN_GUARD_SECONDS] == 0.5
     assert cover[CONF_CLOSE_GUARD_SECONDS] == 0.8
+    session.async_confirm_stationary_endpoint.assert_awaited_once_with()
     assert cover["calibration"] == {
         "source": CALIBRATION_SOURCE_GUIDED_HA,
         "open_samples": [9.8, 9.9],
@@ -1081,7 +1123,7 @@ async def test_guided_pico_calibration_does_not_duplicate_commands(
                 CONF_CLOSE_GUARD_SECONDS: 1.0,
                 CONF_BINDINGS: [
                     binding.as_dict()
-                    for binding in standard_pico_bindings(["68551522"])
+                    for binding in standard_pico_bindings(["68551522", "66286451"])
                 ],
             }
         }
@@ -1105,34 +1147,52 @@ async def test_guided_pico_calibration_does_not_duplicate_commands(
         result = await hass.config_entries.options.async_configure(
             result["flow_id"], {"next_step_id": "calibrate_pico"}
         )
-        assert result["type"] is FlowResultType.FORM
+        assert result["type"] is FlowResultType.MENU
+        assert result["menu_options"] == ("calibrate_pico_begin", "calibrate")
+        controls = result["description_placeholders"]["controls"]
+        assert "Dining Room Pico" in controls
+        assert "Hallway Main Stairs Position 1 Keypad" in controls
         result = await hass.config_entries.options.async_configure(
-            result["flow_id"],
-            {"open_binding": "0", "close_binding": "0", "stop_binding": "0"},
+            result["flow_id"], {"next_step_id": "calibrate_pico_begin"}
         )
         assert result["step_id"] == "calibration_pico_positioning"
+        assert "68551522" not in str(result["description_placeholders"])
         result = await hass.config_entries.options.async_configure(
             result["flow_id"],
             {"next_step_id": "calibration_pico_at_endpoint"},
         )
-        assert result["step_id"] == "calibration_leg_complete"
+        assert result["step_id"] == "calibration_positioning_complete"
+        assert result["description_placeholders"] == {
+            "endpoint": "fully closed",
+            "next_step": "Open sample 1",
+        }
         result = await hass.config_entries.options.async_configure(
             result["flow_id"], {}
         )
-        for _ in range(4):
+        for step in (
+            "Open sample 1",
+            "Close sample 1",
+            "Open sample 2",
+            "Close sample 2",
+        ):
             assert result["step_id"] == "calibration_pico_sample"
+            assert result["description_placeholders"]["step"] == step
             result = await hass.config_entries.options.async_configure(
                 result["flow_id"],
                 {"next_step_id": "calibration_pico_listen"},
             )
             result = await _async_resolve_progress(hass, result)
             assert result["step_id"] == "calibration_leg_complete"
+            assert result["description_placeholders"]["step"] == step
             result = await hass.config_entries.options.async_configure(
                 result["flow_id"], {}
             )
 
     assert result["step_id"] == "calibration_summary"
     assert session.async_measure_pico_movement.await_count == 4
+    for measurement in session.async_measure_pico_movement.await_args_list:
+        assert len(measurement.args[0]) == 2
+        assert len(measurement.args[1]) == 2
     session.async_confirm_stationary_endpoint.assert_awaited_once_with()
     session.async_start_home_assistant_movement.assert_not_awaited()
     result = await hass.config_entries.options.async_configure(
@@ -1150,6 +1210,61 @@ async def test_guided_pico_calibration_does_not_duplicate_commands(
         "open_samples": [9.8, 9.9],
         "close_samples": [9.3, 9.2],
     }
+
+
+async def test_pico_calibration_retry_identifies_missing_stop(
+    hass: HomeAssistant,
+) -> None:
+    """Tell the operator which correlated Pico calibration event was missing."""
+    options = {
+        CONF_ESTIMATED_COVERS: {
+            "805": {
+                CONF_DEVICE_CLASS: "blind",
+                CONF_OPEN_TRAVEL_SECONDS: 10.0,
+                CONF_CLOSE_TRAVEL_SECONDS: 10.0,
+                CONF_OPEN_GUARD_SECONDS: 1.0,
+                CONF_CLOSE_GUARD_SECONDS: 1.0,
+                CONF_BINDINGS: [
+                    binding.as_dict()
+                    for binding in standard_pico_bindings(["68551522"])
+                ],
+            }
+        }
+    }
+    entry = await async_setup_integration(hass, MockBridge, options=options)
+    session = AsyncMock()
+    session.async_measure_pico_movement.side_effect = SetupCaptureTimeout(
+        SetupCaptureFailureReason.STOP_NOT_DETECTED,
+        "mapped Stop action was not detected",
+    )
+
+    result = await _async_start_cover_options(hass, entry)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"next_step_id": "calibrate"}
+    )
+    manager = entry.runtime_data.open_close_stop_manager
+    with patch.object(manager, "async_begin_setup", AsyncMock(return_value=session)):
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], {"next_step_id": "calibrate_pico"}
+        )
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], {"next_step_id": "calibrate_pico_begin"}
+        )
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            {"next_step_id": "calibration_pico_at_endpoint"},
+        )
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], {}
+        )
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            {"next_step_id": "calibration_pico_listen"},
+        )
+        result = await _async_resolve_progress(hass, result)
+
+    assert result["step_id"] == "calibration_pico_retry"
+    assert result["errors"] == {"base": "setup_stop_not_detected"}
 
 
 async def test_simultaneous_setup_flows_are_rejected(hass: HomeAssistant) -> None:

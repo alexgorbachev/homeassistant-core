@@ -88,26 +88,30 @@
     },
     "error": {
       "binding_already_assigned": "That Pico button and gesture is already assigned to a cover",
-      "calibration_capture_failed": "Home Assistant did not receive the expected direction, motor, and Stop events. The motor was stopped if it might still have been moving.",
       "capture_mismatch": "Motor activity could not be correlated to the captured Pico gesture. The motor was stopped for safety.",
       "capture_timeout": "No complete Pico interaction was detected within ten seconds.",
       "command_failed": "The movement command failed. The cover remains unsynchronized.",
       "pico_already_assigned": "One of these Pico actions is already assigned to another estimated cover",
+      "setup_controller_reconnected": "The Lutron processor reconnected during capture, so the movement could not be measured safely.",
+      "setup_direction_not_detected": "Home Assistant did not detect a compatible mapped direction action.",
       "setup_failed": "Home Assistant could not safely start guided setup. Check the Lutron connection and try again.",
       "setup_in_progress": "Another setup or calibration session is already active for this integration",
+      "setup_stop_not_detected": "Home Assistant detected the movement but did not detect a compatible mapped Stop action.",
+      "setup_unexpected_zone_activity": "Home Assistant received unexpected motor-zone activity during capture.",
+      "setup_zone_not_detected": "Home Assistant detected the mapped direction action but did not receive the target motor-zone update.",
       "stop_failed": "Home Assistant could not confirm the Stop command. Check the motor before continuing.",
       "verification_failed": "The expected Pico interaction was not completed. Try again.",
       "verification_mismatch": "A different button or gesture was detected. Use the requested standard Pico action."
     },
     "progress": {
-      "calibrate_pico_close_1": "Close sample 1: press the selected Close action, then Stop immediately at fully closed…",
-      "calibrate_pico_close_2": "Close sample 2: press the selected Close action, then Stop immediately at fully closed…",
-      "calibrate_pico_close_3": "Close sample 3: press the selected Close action, then Stop immediately at fully closed…",
-      "calibrate_pico_open_1": "Open sample 1: press the selected Open action, then Stop immediately at fully open…",
-      "calibrate_pico_open_2": "Open sample 2: press the selected Open action, then Stop immediately at fully open…",
-      "calibrate_pico_open_3": "Open sample 3: press the selected Open action, then Stop immediately at fully open…",
-      "calibrate_pico_position_close": "Positioning: press the selected Close action, then Stop at fully closed…",
-      "calibrate_pico_position_open": "Positioning: press the selected Open action, then Stop at fully open…",
+      "calibrate_pico_close_1": "Close sample 1: use any mapped Close action, then Stop immediately at fully closed…",
+      "calibrate_pico_close_2": "Close sample 2: use any mapped Close action, then Stop immediately at fully closed…",
+      "calibrate_pico_close_3": "Close sample 3: use any mapped Close action, then Stop immediately at fully closed…",
+      "calibrate_pico_open_1": "Open sample 1: use any mapped Open action, then Stop immediately at fully open…",
+      "calibrate_pico_open_2": "Open sample 2: use any mapped Open action, then Stop immediately at fully open…",
+      "calibrate_pico_open_3": "Open sample 3: use any mapped Open action, then Stop immediately at fully open…",
+      "calibrate_pico_position_close": "Positioning: use any mapped Close action, then Stop at fully closed…",
+      "calibrate_pico_position_open": "Positioning: use any mapped Open action, then Stop at fully open…",
       "learn_close": "Listening for the Close gesture and its motor movement…",
       "learn_open": "Listening for the Open gesture and its motor movement…",
       "learn_stop": "Listening for a Stop gesture…",
@@ -185,20 +189,29 @@
         "title": "Choose a calibration method"
       },
       "calibrate_pico": {
-        "data": {
-          "close_binding": "Close action",
-          "open_binding": "Open action",
-          "stop_binding": "Stop action"
+        "description": "This calibration measures full Open and Close travel while you operate a mapped physical Pico or keypad. At every endpoint, use a mapped Stop action as soon as movement is visibly complete; that timing is later prorated to estimate partial positions. Home Assistant listens only, so it does not duplicate the Lutron processor's commands. It first establishes fully closed without timing that positioning movement, then measures Open 1, Close 1, Open 2, and Close 2. You may use any compatible mapped action shown here: {controls}.",
+        "menu_options": {
+          "calibrate": "Back to calibration methods",
+          "calibrate_pico_begin": "Start calibration"
         },
-        "description": "Choose the exact mapped actions to use. Home Assistant listens only; the Lutron processor moves the motor, so no command is duplicated. The sequence first establishes fully closed, then measures Open 1, Close 1, Open 2, and Close 2. Current defaults — Open: {open_binding}. Close: {close_binding}. Stop: {stop_binding}.",
-        "submit": "Start calibration",
         "title": "Calibrate with mapped Pico controls"
+      },
+      "calibrate_pico_begin": {
+        "title": "Start mapped-Pico calibration"
       },
       "calibration_cancel": {
         "title": "Cancel calibration"
       },
+      "calibration_ha_at_endpoint": {
+        "title": "The cover is already at this endpoint"
+      },
       "calibration_ha_begin": {
         "title": "Start movement"
+      },
+      "calibration_ha_endpoint_error": {
+        "description": "Home Assistant could not send the safety Stop used to confirm this endpoint. Check the cover before retrying.",
+        "submit": "Return to endpoint preparation",
+        "title": "Could not confirm endpoint"
       },
       "calibration_ha_error": {
         "description": "Home Assistant could not start this movement. No timing was saved.",
@@ -206,14 +219,15 @@
         "title": "Movement did not start"
       },
       "calibration_ha_finish": {
-        "description": "The cover is {direction}. The moment it is {endpoint}, select **Stop now** immediately. This reaction time is part of the measurement, so prompt timing improves the estimate. Step: {step}.",
+        "description": "The cover is {direction}. The moment it is {endpoint}, select **Stop now** immediately. {timing_guidance} Step: {step}.",
         "submit": "Stop now",
         "title": "Stop at the endpoint"
       },
       "calibration_ha_start": {
-        "description": "When you select **Start movement**, Home Assistant will begin {direction} the cover and immediately show a Stop screen. Watch the cover and select Stop the moment it is {endpoint}. Step: {step}.",
+        "description": "When you select **Start movement**, Home Assistant will begin {direction} the cover and immediately show a Stop screen. Watch the cover and select Stop the moment it is {endpoint}. {timing_guidance} Step: {step}.",
         "menu_options": {
           "calibration_cancel": "Cancel calibration safely",
+          "calibration_ha_at_endpoint": "The cover is already at this endpoint",
           "calibration_ha_begin": "Start movement"
         },
         "title": "Prepare the next movement"
@@ -235,7 +249,7 @@
         "title": "Listen for this movement"
       },
       "calibration_pico_positioning": {
-        "description": "First establish a known starting endpoint; this movement is not timed. To move, select **Listen**, then perform {direction_binding} and press {stop_binding} at {endpoint}. If the cover is visibly already {endpoint}, choose that option instead; Home Assistant sends a safety Stop and continues without requiring a motor event.",
+        "description": "Calibration first needs a known starting endpoint: {endpoint}. This positioning step is not timed and will not be included in the travel-time result. If the cover needs to move, choose **Listen for the positioning movement**, use any mapped direction action ({direction_bindings}), then use any mapped Stop action ({stop_bindings}) as soon as it reaches {endpoint}. If the cover is already visibly {endpoint}, choose that option instead; Home Assistant sends a safety Stop and continues without movement or a recorded sample.",
         "menu_options": {
           "calibration_cancel": "Cancel calibration safely",
           "calibration_pico_at_endpoint": "The cover is already at this endpoint",
@@ -244,21 +258,26 @@
         "title": "Establish the starting endpoint"
       },
       "calibration_pico_progress": {
-        "description": "Home Assistant is listening for {direction_binding}, the corresponding motor-zone update, and then {stop_binding}. Press Stop immediately when the cover is {endpoint}.",
+        "description": "Home Assistant is listening for any compatible mapped direction action ({direction_bindings}), the corresponding motor-zone update, and then any mapped Stop action ({stop_bindings}). Use Stop immediately when the cover is {endpoint}.",
         "title": "Listening for calibration movement"
       },
       "calibration_pico_retry": {
-        "description": "The expected sequence was not completed for {step}. Review the selected direction and Stop actions, then retry. Home Assistant sends Stop whenever it believes the motor may still be moving.",
+        "description": "The expected sequence was not completed for {step}. The error above identifies whether the direction action, motor-zone update, or Stop action was missing. Review the mapped controls and retry. Home Assistant sends Stop whenever it believes the motor may still be moving.",
         "submit": "Return to this step",
         "title": "Retry Pico calibration"
       },
       "calibration_pico_sample": {
-        "description": "Select **Listen**, then perform {direction_binding}. The moment the cover is {endpoint}, perform {stop_binding}. Home Assistant measures from the direction event to the Stop event and does not send duplicate movement commands.",
+        "description": "Select **Listen**, then use any mapped direction action ({direction_bindings}). The moment the cover is {endpoint}, use any mapped Stop action ({stop_bindings}). Home Assistant measures from the observed direction event to the Stop event and does not send duplicate movement commands.",
         "menu_options": {
           "calibration_cancel": "Cancel calibration safely",
           "calibration_pico_listen": "Listen for {step}"
         },
         "title": "Prepare the next Pico movement"
+      },
+      "calibration_positioning_complete": {
+        "description": "The cover is confirmed {endpoint}. No duration was recorded because this established a known endpoint; it was not a calibration sample. You are ready for {next_step}.",
+        "submit": "Continue to the measured sample",
+        "title": "Starting position confirmed"
       },
       "calibration_start_error": {
         "description": "Home Assistant could not reserve a safe setup session. No motor command was sent and no timing was changed.",
