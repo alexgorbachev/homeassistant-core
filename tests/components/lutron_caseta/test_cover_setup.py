@@ -22,7 +22,9 @@ from homeassistant.components.lutron_caseta.cover_estimator import (
 from homeassistant.components.lutron_caseta.cover_setup import (
     OpenCloseStopSetupSession,
     SetupButtonEvent,
+    SetupCaptureFailureReason,
     SetupCaptureMismatch,
+    SetupCaptureTimeout,
     SetupSessionBusyError,
     ThirdSampleRequired,
     aggregate_calibration_samples,
@@ -179,8 +181,10 @@ async def test_unmatched_button_uses_forward_correlation_deadline(
     assert not capture.done()
     await fake_time.advance(0.01)
 
-    with pytest.raises(SetupCaptureMismatch, match="no target-zone update"):
+    with pytest.raises(SetupCaptureMismatch, match="no target-zone update") as err:
         await capture
+    assert err.value.reason is SetupCaptureFailureReason.ZONE_NOT_DETECTED
+    assert session.diagnostics["last_failure_reason"] == "zone_not_detected"
     stop_cover.assert_awaited_once_with()
 
 
@@ -277,7 +281,14 @@ async def test_pico_calibration_measures_without_duplicate_commands(
     session, fake_time, raise_cover, lower_cover, stop_cover = setup_session
     measurement = asyncio.create_task(
         session.async_measure_pico_movement(
-            ("69990001", 3, "press"), ("69990001", 1, "press")
+            {
+                ("68551522", 3, "press"),
+                ("69990001", 3, "press"),
+            },
+            {
+                ("68551522", 1, "press"),
+                ("69990001", 1, "press"),
+            },
         )
     )
     await asyncio.sleep(0)
@@ -294,6 +305,68 @@ async def test_pico_calibration_measures_without_duplicate_commands(
     raise_cover.assert_not_awaited()
     lower_cover.assert_not_awaited()
     stop_cover.assert_not_awaited()
+
+
+async def test_pico_calibration_reports_missing_direction(setup_session) -> None:
+    """Classify a calibration timeout before any mapped direction arrives."""
+    session, fake_time, _, _, stop_cover = setup_session
+    measurement = asyncio.create_task(
+        session.async_measure_pico_movement(
+            {("69990001", 3, "press")},
+            {("69990001", 1, "press")},
+            timeout=1,
+        )
+    )
+    await _advance_until_done(fake_time, measurement, step=0.5)
+
+    with pytest.raises(SetupCaptureTimeout) as err:
+        await measurement
+    assert err.value.reason is SetupCaptureFailureReason.DIRECTION_NOT_DETECTED
+    assert session.diagnostics["last_failure_reason"] == "direction_not_detected"
+    stop_cover.assert_not_awaited()
+
+
+async def test_pico_calibration_reports_missing_zone(setup_session) -> None:
+    """Classify a mapped direction that has no target-zone notification."""
+    session, fake_time, _, _, stop_cover = setup_session
+    measurement = asyncio.create_task(
+        session.async_measure_pico_movement(
+            {("69990001", 3, "press")},
+            {("69990001", 1, "press")},
+        )
+    )
+    await asyncio.sleep(0)
+    session.receive_button(SetupButtonEvent("69990001", 3, "raise", "press", 0.0))
+    await _advance_until_done(fake_time, measurement, step=0.5)
+
+    with pytest.raises(SetupCaptureMismatch) as err:
+        await measurement
+    assert err.value.reason is SetupCaptureFailureReason.ZONE_NOT_DETECTED
+    assert session.diagnostics["last_failure_reason"] == "zone_not_detected"
+    stop_cover.assert_awaited_once_with()
+
+
+async def test_pico_calibration_reports_missing_stop(setup_session) -> None:
+    """Classify a correlated movement that has no mapped Stop action."""
+    session, fake_time, _, _, stop_cover = setup_session
+    measurement = asyncio.create_task(
+        session.async_measure_pico_movement(
+            {("69990001", 3, "press")},
+            {("69990001", 1, "press")},
+            timeout=1,
+        )
+    )
+    await asyncio.sleep(0)
+    session.receive_button(SetupButtonEvent("69990001", 3, "raise", "press", 0.0))
+    await fake_time.advance(0.1)
+    session.receive_zone_update(initial=False)
+    await _advance_until_done(fake_time, measurement, step=0.5)
+
+    with pytest.raises(SetupCaptureTimeout) as err:
+        await measurement
+    assert err.value.reason is SetupCaptureFailureReason.STOP_NOT_DETECTED
+    assert session.diagnostics["last_failure_reason"] == "stop_not_detected"
+    stop_cover.assert_awaited_once_with()
 
 
 async def test_manager_exclusively_routes_setup_events(hass: HomeAssistant) -> None:

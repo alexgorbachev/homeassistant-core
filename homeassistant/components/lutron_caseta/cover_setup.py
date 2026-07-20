@@ -1,9 +1,10 @@
 """Capture Pico actions and calibrate OpenCloseStop covers safely."""
 
 import asyncio
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Collection, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
+from enum import StrEnum
 from statistics import mean, median
 import time
 from typing import Any
@@ -30,11 +31,30 @@ class SetupSessionBusyError(SetupSessionError):
     """The requested cover already has an active setup session."""
 
 
-class SetupCaptureTimeout(SetupSessionError):
+class SetupCaptureFailureReason(StrEnum):
+    """Describe the non-sensitive reason a setup capture failed."""
+
+    CONTROLLER_RECONNECTED = "controller_reconnected"
+    DIRECTION_NOT_DETECTED = "direction_not_detected"
+    STOP_NOT_DETECTED = "stop_not_detected"
+    UNEXPECTED_ZONE_ACTIVITY = "unexpected_zone_activity"
+    ZONE_NOT_DETECTED = "zone_not_detected"
+
+
+class SetupCaptureError(SetupSessionError):
+    """Base error for an incomplete or mismatched setup interaction."""
+
+    def __init__(self, reason: SetupCaptureFailureReason, message: str) -> None:
+        """Initialize the stable diagnostic reason and operator-facing detail."""
+        super().__init__(message)
+        self.reason = reason
+
+
+class SetupCaptureTimeout(SetupCaptureError):
     """No complete setup interaction arrived before the deadline."""
 
 
-class SetupCaptureMismatch(SetupSessionError):
+class SetupCaptureMismatch(SetupCaptureError):
     """Controller activity could not be correlated to a Pico interaction."""
 
 
@@ -119,6 +139,7 @@ class OpenCloseStopSetupSession:
         self._measurement_started_at: float | None = None
         self._watchdog: asyncio.Task[None] | None = None
         self._last_operation: str | None = None
+        self._last_failure_reason: SetupCaptureFailureReason | None = None
 
     @property
     def diagnostics(self) -> dict[str, str | bool | None]:
@@ -128,6 +149,11 @@ class OpenCloseStopSetupSession:
             "operation_active": self._operation_active,
             "may_be_moving": self._may_be_moving,
             "last_operation": self._last_operation,
+            "last_failure_reason": (
+                self._last_failure_reason.value
+                if self._last_failure_reason is not None
+                else None
+            ),
         }
 
     def receive_button(self, event: SetupButtonEvent) -> None:
@@ -204,14 +230,19 @@ class OpenCloseStopSetupSession:
 
     async def async_measure_pico_movement(
         self,
-        direction: PicoEventKey,
-        stop: PicoEventKey,
+        directions: Collection[PicoEventKey],
+        stops: Collection[PicoEventKey],
         *,
         timeout: float = CALIBRATION_TIMEOUT_SECONDS,
     ) -> float:
-        """Measure a mapped Pico direction-to-Stop interaction without commands."""
+        """Measure any mapped direction-to-Stop interaction without commands."""
         self._begin_operation("calibrate_pico")
         self._drain_events()
+        direction_keys = frozenset(directions)
+        stop_keys = frozenset(stops)
+        if not direction_keys or not stop_keys:
+            self._end_operation()
+            raise ValueError("Pico calibration needs direction and Stop mappings")
         deadline = self._monotonic() + timeout
         direction_event: SetupButtonEvent | None = None
         zone_event: _SetupZoneEvent | None = None
@@ -220,7 +251,7 @@ class OpenCloseStopSetupSession:
             while True:
                 now = self._monotonic()
                 if now >= deadline:
-                    raise SetupCaptureTimeout
+                    raise self._pico_capture_timeout(correlated)
                 event_deadline = deadline
                 if direction_event is not None and zone_event is None:
                     event_deadline = min(
@@ -236,27 +267,31 @@ class OpenCloseStopSetupSession:
                 if event is None:
                     now = self._monotonic()
                     if now >= deadline:
-                        raise SetupCaptureTimeout
+                        raise self._pico_capture_timeout(correlated)
                 if isinstance(event, _SetupZoneEvent):
                     if event.initial:
-                        raise SetupCaptureMismatch(
-                            "controller reconnected during calibration"
+                        raise self._mismatch(
+                            SetupCaptureFailureReason.CONTROLLER_RECONNECTED,
+                            "controller reconnected during calibration",
                         )
                     if correlated:
-                        raise SetupCaptureMismatch("unexpected target-zone activity")
+                        raise self._mismatch(
+                            SetupCaptureFailureReason.UNEXPECTED_ZONE_ACTIVITY,
+                            "unexpected target-zone activity",
+                        )
                     zone_event = event
                     self._may_be_moving = True
                 elif (
                     isinstance(event, SetupButtonEvent)
                     and direction_event is None
-                    and event.event_key == direction
+                    and event.event_key in direction_keys
                 ):
                     direction_event = event
                     self._may_be_moving = True
                 elif (
                     isinstance(event, SetupButtonEvent)
                     and correlated
-                    and event.event_key == stop
+                    and event.event_key in stop_keys
                 ):
                     assert direction_event is not None
                     self._may_be_moving = False
@@ -266,8 +301,9 @@ class OpenCloseStopSetupSession:
                     if self._events_correlate(direction_event, zone_event):
                         correlated = True
                     elif zone_event.timestamp < direction_event.timestamp:
-                        raise SetupCaptureMismatch(
-                            "zone event arrived without its Pico action"
+                        raise self._mismatch(
+                            SetupCaptureFailureReason.DIRECTION_NOT_DETECTED,
+                            "zone event arrived without its Pico action",
                         )
 
                 now = self._monotonic()
@@ -276,14 +312,18 @@ class OpenCloseStopSetupSession:
                     and zone_event is None
                     and now >= direction_event.timestamp + EXPECTED_ZONE_EVENT_SECONDS
                 ):
-                    raise SetupCaptureMismatch("Pico direction produced no zone event")
+                    raise self._mismatch(
+                        SetupCaptureFailureReason.ZONE_NOT_DETECTED,
+                        "Pico direction produced no zone event",
+                    )
                 if (
                     zone_event is not None
                     and direction_event is None
                     and now >= zone_event.timestamp + ZONE_EVENT_GRACE_SECONDS
                 ):
-                    raise SetupCaptureMismatch(
-                        "zone event arrived without its Pico action"
+                    raise self._mismatch(
+                        SetupCaptureFailureReason.DIRECTION_NOT_DETECTED,
+                        "zone event arrived without its Pico action",
                     )
         finally:
             if self._may_be_moving:
@@ -356,15 +396,20 @@ class OpenCloseStopSetupSession:
             if now >= next_deadline:
                 if zones:
                     await self._async_stop_safely()
-                    raise SetupCaptureMismatch(
-                        "zone event arrived without a correlated Pico action"
+                    raise self._mismatch(
+                        SetupCaptureFailureReason.DIRECTION_NOT_DETECTED,
+                        "zone event arrived without a correlated Pico action",
                     )
                 if buttons:
                     await self._async_stop_safely()
-                    raise SetupCaptureMismatch(
-                        "Pico action produced no target-zone update"
+                    raise self._mismatch(
+                        SetupCaptureFailureReason.ZONE_NOT_DETECTED,
+                        "Pico action produced no target-zone update",
                     )
-                raise SetupCaptureTimeout
+                raise self._timeout(
+                    SetupCaptureFailureReason.DIRECTION_NOT_DETECTED,
+                    "direction action was not detected",
+                )
 
             event = await self._async_next_event(next_deadline - now)
             if event is None:
@@ -375,7 +420,10 @@ class OpenCloseStopSetupSession:
                 continue
             if event.initial:
                 await self._async_stop_safely()
-                raise SetupCaptureMismatch("controller reconnected during capture")
+                raise self._mismatch(
+                    SetupCaptureFailureReason.CONTROLLER_RECONNECTED,
+                    "controller reconnected during capture",
+                )
             self._may_be_moving = True
             zones.append(event)
 
@@ -385,7 +433,10 @@ class OpenCloseStopSetupSession:
         while True:
             now = self._monotonic()
             if now >= deadline:
-                raise SetupCaptureTimeout
+                raise self._timeout(
+                    SetupCaptureFailureReason.STOP_NOT_DETECTED,
+                    "Stop action was not detected",
+                )
             wait = CAPTURE_QUIET_SECONDS if buttons else deadline - now
             event = await self._async_next_event(min(wait, deadline - now))
             if event is None:
@@ -398,8 +449,9 @@ class OpenCloseStopSetupSession:
             if not event.initial:
                 self._may_be_moving = True
                 await self._async_stop_safely()
-                raise SetupCaptureMismatch(
-                    "unexpected target-zone activity while learning Stop"
+                raise self._mismatch(
+                    SetupCaptureFailureReason.UNEXPECTED_ZONE_ACTIVITY,
+                    "unexpected target-zone activity while learning Stop",
                 )
 
     async def _async_collect_quiet(
@@ -464,6 +516,7 @@ class OpenCloseStopSetupSession:
         self._operation_active = True
         self._operation_task = asyncio.current_task()
         self._last_operation = name
+        self._last_failure_reason = None
 
     def _end_operation(self) -> None:
         self._operation_active = False
@@ -472,6 +525,32 @@ class OpenCloseStopSetupSession:
     def _drain_events(self) -> None:
         while not self._events.empty():
             self._events.get_nowait()
+
+    def _timeout(
+        self, reason: SetupCaptureFailureReason, message: str
+    ) -> SetupCaptureTimeout:
+        """Record and return a classified capture timeout."""
+        self._last_failure_reason = reason
+        return SetupCaptureTimeout(reason, message)
+
+    def _pico_capture_timeout(self, movement_detected: bool) -> SetupCaptureTimeout:
+        """Classify which end of a mapped Pico sequence timed out."""
+        if movement_detected:
+            return self._timeout(
+                SetupCaptureFailureReason.STOP_NOT_DETECTED,
+                "mapped Stop action was not detected",
+            )
+        return self._timeout(
+            SetupCaptureFailureReason.DIRECTION_NOT_DETECTED,
+            "mapped direction action was not detected",
+        )
+
+    def _mismatch(
+        self, reason: SetupCaptureFailureReason, message: str
+    ) -> SetupCaptureMismatch:
+        """Record and return a classified capture mismatch."""
+        self._last_failure_reason = reason
+        return SetupCaptureMismatch(reason, message)
 
     def _direction_command(self, action: ExternalAction) -> AsyncCommand:
         return self._raise_cover if action is ExternalAction.OPEN else self._lower_cover
