@@ -10,6 +10,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.helpers.device_registry import DeviceInfo
 
 from .estimated_cover import OpenCloseStopManager
+from .estimated_cover_draft import EstimatedCoverDraftStore
 
 type LutronCasetaConfigEntry = ConfigEntry[LutronCasetaData]
 
@@ -22,6 +23,7 @@ class LutronCasetaData:
     bridge_device: dict[str, Any]
     keypad_data: LutronKeypadData
     open_close_stop_manager: OpenCloseStopManager
+    estimated_cover_draft_store: EstimatedCoverDraftStore
 
 
 @dataclass
