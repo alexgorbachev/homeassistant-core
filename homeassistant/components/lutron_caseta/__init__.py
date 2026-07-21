@@ -55,6 +55,7 @@ from .device_trigger import (
     LUTRON_BUTTON_TRIGGER_SCHEMA,
 )
 from .estimated_cover import OpenCloseStopManager, parse_estimated_cover_configs
+from .estimated_cover_draft import EstimatedCoverDraftStore
 from .models import (
     LUTRON_BUTTON_LEAP_BUTTON_NUMBER,
     LUTRON_KEYPAD_AREA_NAME,
@@ -220,7 +221,11 @@ async def async_setup_entry(
         hass, bridge, parse_estimated_cover_configs(entry.options)
     )
     entry.runtime_data = LutronCasetaData(
-        bridge, bridge_device, keypad_data, open_close_stop_manager
+        bridge,
+        bridge_device,
+        keypad_data,
+        open_close_stop_manager,
+        EstimatedCoverDraftStore(hass, entry.entry_id),
     )
     entry.async_on_unload(entry.add_update_listener(_async_reload_entry))
 
@@ -234,6 +239,13 @@ async def _async_reload_entry(
 ) -> None:
     """Reload the bridge when estimated-cover options change."""
     await hass.config_entries.async_reload(entry.entry_id)
+
+
+async def async_remove_entry(
+    hass: HomeAssistant, entry: LutronCasetaConfigEntry
+) -> None:
+    """Remove any incomplete estimated-cover onboarding draft."""
+    await EstimatedCoverDraftStore(hass, entry.entry_id).async_remove()
 
 
 @callback

@@ -218,6 +218,9 @@ class OpenCloseStopSetupSession:
         self._measurement_started_at = self._monotonic()
         self._may_be_moving = True
         self._watchdog = asyncio.create_task(self._async_watchdog(timeout))
+        # The start request has completed even though physical movement remains active.
+        # Cleanup must stop the motor, not cancel the caller that started it.
+        self._operation_task = None
 
     async def async_finish_home_assistant_movement(self) -> float:
         """Stop a user-timed movement and return its elapsed duration."""

@@ -125,13 +125,46 @@
         "description": "Choose a discovered OpenCloseStop motor zone. Home Assistant estimates position from calibrated movement time; the Lutron processor does not report a physical percentage.",
         "title": "Add an estimated cover"
       },
+      "add_controls": {
+        "description": "Set up physical controls for {zone} before measuring travel time. Adding a standard Pico now is recommended because it also enables Pico-driven calibration. Standard Picos use raise for Open, lower for Close, and the center button for Stop. Current standard Picos: {standard_picos}. Current mappings: {bindings}.",
+        "menu_options": {
+          "add_method": "Back to cover type",
+          "add_standard_picos": "Add or change standard Pico remotes",
+          "add_without_pico": "Continue with the current controls"
+        },
+        "title": "Set up physical controls"
+      },
       "add_method": {
         "data": {
-          "device_class": "Cover type",
-          "setup_method": "Timing setup"
+          "device_class": "Cover type"
         },
-        "description": "Set up {zone}. Guided calibration measures the motor and is recommended. Manual timing does not move the motor and is useful when reliable measurements are already known.",
-        "title": "Choose setup method"
+        "description": "Choose how Home Assistant should present {zone}. Lutron reports only Open, Close, and Stop for this zone, so Home Assistant cannot discover whether the motor drives a blind, shade, or curtain.",
+        "title": "Choose the cover type"
+      },
+      "add_review": {
+        "description": "Review the complete setup for {zone}. Type: {cover_type}. Full travel: open {open_time}s, close {close_time}s. Endpoint guards: {guards}. Standard Picos: {standard_picos}. All mappings: {bindings}. Nothing becomes active until you select **Save cover**.",
+        "menu_options": {
+          "add_controls": "Change physical controls",
+          "add_timing": "Change timing",
+          "finish": "Save cover"
+        },
+        "title": "Review estimated cover"
+      },
+      "add_standard_picos": {
+        "title": "Add standard Pico remotes"
+      },
+      "add_timing": {
+        "description": "Choose how to establish full Open and Close travel times for {zone}. Mapped-Pico calibration is recommended when compatible Open, Close, and Stop actions are ready. Home Assistant calibration moves the motor from this wizard. Manual timing moves nothing and is intended for known measurements or recovery. Current controls: {controls}.",
+        "menu_options": {
+          "add_controls": "Back to physical controls",
+          "calibrate_ha": "Calibrate with Home Assistant controls",
+          "calibrate_pico": "Calibrate with mapped Pico controls",
+          "manual_timing": "Enter known timing manually"
+        },
+        "title": "Choose how to establish timing"
+      },
+      "add_without_pico": {
+        "title": "Continue with current controls"
       },
       "advanced_add": {
         "data": {
@@ -175,6 +208,7 @@
       "binding_conflict": {
         "description": "This Pico button and gesture is already assigned to another estimated cover. No mapping was staged.",
         "menu_options": {
+          "add_controls": "Return to physical controls",
           "zone": "Back to this cover"
         },
         "title": "Action is assigned elsewhere"
@@ -191,6 +225,7 @@
       "calibrate_pico": {
         "description": "This calibration measures full Open and Close travel while you operate a mapped physical Pico or keypad. At every endpoint, use a mapped Stop action as soon as movement is visibly complete; that timing is later prorated to estimate partial positions. Home Assistant listens only, so it does not duplicate the Lutron processor's commands. It first establishes fully closed without timing that positioning movement, then measures Open 1, Close 1, Open 2, and Close 2. You may use any compatible mapped action shown here: {controls}.",
         "menu_options": {
+          "add_timing": "Back to timing methods",
           "calibrate": "Back to calibration methods",
           "calibrate_pico_begin": "Start calibration"
         },
@@ -224,18 +259,13 @@
         "title": "Stop at the endpoint"
       },
       "calibration_ha_start": {
-        "description": "When you select **Start movement**, Home Assistant will begin {direction} the cover and immediately show a Stop screen. Watch the cover and select Stop the moment it is {endpoint}. {timing_guidance} Step: {step}.",
+        "description": "{previous_result} When you select **Start movement**, Home Assistant will begin {direction} the cover and immediately show a Stop screen. Watch the cover and select Stop the moment it is {endpoint}. {timing_guidance} Step: {step}.",
         "menu_options": {
           "calibration_cancel": "Cancel calibration safely",
           "calibration_ha_at_endpoint": "The cover is already at this endpoint",
           "calibration_ha_begin": "Start movement"
         },
         "title": "Prepare the next movement"
-      },
-      "calibration_leg_complete": {
-        "description": "{step} is complete. Recorded duration: {duration}. Continue when you are ready for the next instruction.",
-        "submit": "Continue",
-        "title": "Calibration step complete"
       },
       "calibration_pico_at_endpoint": {
         "title": "Already at this endpoint"
@@ -249,7 +279,7 @@
         "title": "Listen for this movement"
       },
       "calibration_pico_positioning": {
-        "description": "Calibration first needs a known starting endpoint: {endpoint}. This positioning step is not timed and will not be included in the travel-time result. If the cover needs to move, choose **Listen for the positioning movement**, use any mapped direction action ({direction_bindings}), then use any mapped Stop action ({stop_bindings}) as soon as it reaches {endpoint}. If the cover is already visibly {endpoint}, choose that option instead; Home Assistant sends a safety Stop and continues without movement or a recorded sample.",
+        "description": "{previous_result} Calibration first needs a known starting endpoint: {endpoint}. This positioning step is not timed and will not be included in the travel-time result. If the cover needs to move, choose **Listen for the positioning movement**, use any mapped direction action ({direction_bindings}), then use any mapped Stop action ({stop_bindings}) as soon as it reaches {endpoint}. If the cover is already visibly {endpoint}, choose that option instead; Home Assistant sends a safety Stop and continues without movement or a recorded sample.",
         "menu_options": {
           "calibration_cancel": "Cancel calibration safely",
           "calibration_pico_at_endpoint": "The cover is already at this endpoint",
@@ -267,17 +297,12 @@
         "title": "Retry Pico calibration"
       },
       "calibration_pico_sample": {
-        "description": "Select **Listen**, then use any mapped direction action ({direction_bindings}). The moment the cover is {endpoint}, use any mapped Stop action ({stop_bindings}). Home Assistant measures from the observed direction event to the Stop event and does not send duplicate movement commands.",
+        "description": "{previous_result} Select **Listen**, then use any mapped direction action ({direction_bindings}). The moment the cover is {endpoint}, use any mapped Stop action ({stop_bindings}). Home Assistant measures from the observed direction event to the Stop event and does not send duplicate movement commands.",
         "menu_options": {
           "calibration_cancel": "Cancel calibration safely",
           "calibration_pico_listen": "Listen for {step}"
         },
         "title": "Prepare the next Pico movement"
-      },
-      "calibration_positioning_complete": {
-        "description": "The cover is confirmed {endpoint}. No duration was recorded because this established a known endpoint; it was not a calibration sample. You are ready for {next_step}.",
-        "submit": "Continue to the measured sample",
-        "title": "Starting position confirmed"
       },
       "calibration_start_error": {
         "description": "Home Assistant could not reserve a safe setup session. No motor command was sent and no timing was changed.",
@@ -316,11 +341,21 @@
         },
         "title": "Discard unsaved changes?"
       },
+      "draft_unavailable": {
+        "description": "The incomplete setup belongs to zone {zone_id}, which is not currently discovered as an OpenCloseStop cover. The draft has been preserved. Close this wizard to check the Lutron connection later, or discard the draft explicitly.",
+        "menu_options": {
+          "configure": "Configure another estimated cover",
+          "discard_add_draft": "Discard this unavailable draft"
+        },
+        "title": "Draft cover is not available"
+      },
       "init": {
         "description": "Estimated covers add percentage control to Lutron OpenCloseStop motor zones by timing movement. Physical position is not reported by Lutron, so synchronization and clear Pico mappings matter.",
         "menu_options": {
           "add": "Add an estimated cover",
-          "configure": "Configure an estimated cover"
+          "configure": "Configure an estimated cover",
+          "discard_add_draft": "Discard incomplete setup",
+          "resume_add": "Resume incomplete cover setup"
         },
         "title": "Estimated OpenCloseStop covers"
       },
@@ -418,6 +453,7 @@
       "save_conflict": {
         "description": "Another options flow assigned one of these Pico button gestures while this cover was being edited. Your staged changes were not saved. Review the mappings and resolve the conflict before saving again.",
         "menu_options": {
+          "add_controls": "Return to physical controls",
           "zone": "Return to this cover"
         },
         "title": "Pico mapping changed elsewhere"
@@ -430,6 +466,9 @@
         },
         "title": "Standard Pico remotes"
       },
+      "standard_picos_cancel": {
+        "title": "Cancel standard Pico verification"
+      },
       "standard_picos_edit": {
         "data": {
           "standard_picos": "Standard raise/lower Pico remotes"
@@ -441,10 +480,17 @@
         "submit": "Continue",
         "title": "Choose standard Pico remotes"
       },
-      "verify_binding": {
-        "description": "On {pico}, perform {button} for {action}. Directional verification briefly moves the cover and Home Assistant automatically sends Stop. Nothing is saved until every proposed standard action is verified.",
+      "timing_required": {
+        "description": "This new cover cannot be saved with placeholder timing. Complete guided calibration or enter known full-travel times first.",
         "menu_options": {
-          "standard_picos": "Cancel this Pico change",
+          "add_timing": "Set up timing"
+        },
+        "title": "Travel timing is required"
+      },
+      "verify_binding": {
+        "description": "On {pico}, perform {button} for {action}. {verification_note} Nothing is staged until every proposed standard action is verified.",
+        "menu_options": {
+          "standard_picos_cancel": "Cancel this Pico change",
           "verify_binding_begin": "Listen for this action"
         },
         "title": "Verify standard Pico action"
