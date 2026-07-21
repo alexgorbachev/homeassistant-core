@@ -187,6 +187,77 @@ async def test_pico_actions_track_without_duplicate_commands(estimator_setup) ->
     stop_cover.assert_not_awaited()
 
 
+async def test_pico_reversal_and_repeated_stop_settle_known_position(
+    estimator_setup,
+) -> None:
+    """Replace Pico direction in flight and make repeated Stop idempotent."""
+    estimator, fake_time, raise_cover, lower_cover, stop_cover, _ = estimator_setup
+    await _synchronize_closed(estimator, fake_time)
+    raise_cover.reset_mock()
+    lower_cover.reset_mock()
+    stop_cover.reset_mock()
+
+    await estimator.async_external_action(ExternalAction.OPEN)
+    await fake_time.advance(3)
+    await estimator.async_external_action(ExternalAction.CLOSE)
+    await fake_time.advance(1)
+    await estimator.async_external_action(ExternalAction.STOP)
+    await estimator.async_external_action(ExternalAction.STOP)
+
+    assert estimator.snapshot.state is EstimatorState.IDLE_KNOWN
+    assert estimator.snapshot.position == 20
+    assert estimator.snapshot.last_source == "pico"
+    raise_cover.assert_not_awaited()
+    lower_cover.assert_not_awaited()
+    stop_cover.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("open_seconds", "close_seconds"),
+    [(12.76, 12.23), (12.45, 12.21)],
+    ids=("sofia", "giulia"),
+)
+async def test_site_timings_interpolate_pico_stop_in_both_directions(
+    open_seconds: float, close_seconds: float
+) -> None:
+    """Apply each onsite calibration to Pico reversal and Stop estimation."""
+    fake_time = FakeTime()
+    raise_cover = AsyncMock()
+    lower_cover = AsyncMock()
+    stop_cover = AsyncMock()
+    estimator = OpenCloseStopEstimator(
+        TravelTimes(open_seconds, close_seconds, 1, 1),
+        raise_cover,
+        lower_cover,
+        stop_cover,
+        Mock(),
+        monotonic=fake_time.monotonic,
+        sleep=fake_time.sleep,
+    )
+    try:
+        await estimator.async_move_to(0)
+        await fake_time.advance(close_seconds + 1)
+        raise_cover.reset_mock()
+        lower_cover.reset_mock()
+        stop_cover.reset_mock()
+
+        await estimator.async_external_action(ExternalAction.OPEN)
+        await fake_time.advance(open_seconds / 2)
+        await estimator.async_external_action(ExternalAction.STOP)
+        assert estimator.snapshot.position == 50
+
+        await estimator.async_external_action(ExternalAction.CLOSE)
+        await fake_time.advance(close_seconds / 4)
+        await estimator.async_external_action(ExternalAction.STOP)
+        assert estimator.snapshot.position == 25
+
+        raise_cover.assert_not_awaited()
+        lower_cover.assert_not_awaited()
+        stop_cover.assert_not_awaited()
+    finally:
+        await estimator.async_shutdown()
+
+
 async def test_zone_event_before_pico_is_correlated(estimator_setup) -> None:
     """A zone event immediately before its Pico event does not desynchronize."""
     estimator, fake_time, *_ = estimator_setup

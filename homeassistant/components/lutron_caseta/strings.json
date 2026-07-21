@@ -83,6 +83,7 @@
   },
   "options": {
     "abort": {
+      "config_entry_not_loaded": "The Lutron integration is reloading. Wait a moment, then select Configure again.",
       "no_available_covers": "All discovered OpenCloseStop covers are already configured",
       "no_configured_covers": "No estimated OpenCloseStop covers are configured"
     },

@@ -13,7 +13,12 @@ from pylutron_caseta.smartbridge import Smartbridge
 import voluptuous as vol
 
 from homeassistant.components.cover import CoverDeviceClass
-from homeassistant.config_entries import ConfigFlow, ConfigFlowResult, OptionsFlow
+from homeassistant.config_entries import (
+    ConfigEntryState,
+    ConfigFlow,
+    ConfigFlowResult,
+    OptionsFlow,
+)
 from homeassistant.const import CONF_DEVICE_CLASS, CONF_HOST, CONF_NAME
 from homeassistant.core import callback
 from homeassistant.helpers import selector
@@ -358,6 +363,10 @@ class LutronCasetaOptionsFlow(OptionsFlow):
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Show available cover setup operations."""
+        if self.config_entry.state is not ConfigEntryState.LOADED or not hasattr(
+            self.config_entry, "runtime_data"
+        ):
+            return self.async_abort(reason="config_entry_not_loaded")
         configured = parse_estimated_cover_configs(self.config_entry.options)
         self._draft_store = self.config_entry.runtime_data.estimated_cover_draft_store
         draft = await self._draft_store.async_load()

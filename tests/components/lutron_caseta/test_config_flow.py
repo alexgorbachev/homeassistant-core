@@ -3,10 +3,15 @@
 from ipaddress import ip_address
 from pathlib import Path
 import ssl
+from typing import Any
 from unittest.mock import AsyncMock, patch
 
 from pylutron_caseta.pairing import PAIR_CA, PAIR_CERT, PAIR_KEY
-from pylutron_caseta.smartbridge import Smartbridge
+from pylutron_caseta.smartbridge import (
+    Smartbridge,
+    ZoneStatusEvent,
+    ZoneStatusEventOrigin,
+)
 import pytest
 
 from homeassistant import config_entries
@@ -15,8 +20,14 @@ from homeassistant.components.lutron_caseta import (
     config_flow as CasetaConfigFlow,
 )
 from homeassistant.components.lutron_caseta.const import (
+    ACTION_LONG_PRESS,
     ACTION_MULTITAP,
+    ACTION_PRESS,
+    ACTION_RELEASE,
+    ATTR_ACTION,
+    ATTR_BUTTON_TYPE,
     ATTR_LEAP_BUTTON_NUMBER,
+    ATTR_SERIAL,
     CALIBRATION_SOURCE_GUIDED_HA,
     CALIBRATION_SOURCE_GUIDED_PICO,
     CONF_BINDINGS,
@@ -31,6 +42,7 @@ from homeassistant.components.lutron_caseta.const import (
     CONF_STANDARD_PICOS,
     DEVICE_TYPE_OPEN_CLOSE_STOP,
     ERROR_CANNOT_CONNECT,
+    LUTRON_CASETA_BUTTON_EVENT,
     STEP_IMPORT_FAILED,
 )
 from homeassistant.components.lutron_caseta.cover_estimator import ExternalAction
@@ -73,6 +85,27 @@ MOCK_ASYNC_PAIR_SUCCESS = {
 }
 
 
+def _estimated_cover_options(
+    *,
+    open_time: float = 9.8,
+    close_time: float = 9.3,
+    bindings: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Build one valid estimated-cover options payload for flow tests."""
+    return {
+        CONF_ESTIMATED_COVERS: {
+            "805": {
+                CONF_DEVICE_CLASS: "blind",
+                CONF_OPEN_TRAVEL_SECONDS: open_time,
+                CONF_CLOSE_TRAVEL_SECONDS: close_time,
+                CONF_OPEN_GUARD_SECONDS: 1.0,
+                CONF_CLOSE_GUARD_SECONDS: 1.0,
+                CONF_BINDINGS: bindings or [],
+            }
+        }
+    }
+
+
 class TwoOpenCloseStopMockBridge(MockBridge):
     """Expose two generic OpenCloseStop zones for concurrent editor tests."""
 
@@ -86,6 +119,16 @@ class TwoOpenCloseStopMockBridge(MockBridge):
             "name": "Dining Room_Motorized Window Treatment",
             "type": DEVICE_TYPE_OPEN_CLOSE_STOP,
         }
+        return devices
+
+
+class HomeWorksQSXMockBridge(MockBridge):
+    """Identify the mock processor as HomeWorks QSX."""
+
+    def load_devices(self) -> dict[str, dict]:
+        """Expose native long-hold capability on the processor."""
+        devices = super().load_devices()
+        devices["1"]["type"] = "HWQSProcessor"
         return devices
 
 
@@ -537,6 +580,26 @@ async def _async_start_new_cover(
     )
 
 
+@pytest.mark.parametrize(
+    "entry_state",
+    [
+        config_entries.ConfigEntryState.UNLOAD_IN_PROGRESS,
+        config_entries.ConfigEntryState.SETUP_IN_PROGRESS,
+    ],
+)
+async def test_options_flow_aborts_cleanly_while_entry_reloads(
+    hass: HomeAssistant, entry_state: config_entries.ConfigEntryState
+) -> None:
+    """Avoid a server error when Configure races the options reload."""
+    entry = MockConfigEntry(domain=DOMAIN, state=entry_state)
+    entry.add_to_hass(hass)
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "config_entry_not_loaded"
+
+
 async def test_estimated_cover_options_flow_add(hass: HomeAssistant) -> None:
     """Test adding timing and standard Pico bindings through native options."""
     entry = await async_setup_integration(hass, MockBridge)
@@ -775,6 +838,48 @@ async def test_estimated_cover_options_flow_edit(hass: HomeAssistant) -> None:
     assert cover[CONF_CLOSE_GUARD_SECONDS] == 0.6
 
 
+async def test_dirty_edit_back_requires_explicit_discard(
+    hass: HomeAssistant,
+) -> None:
+    """Keep pending edits when going back until the user confirms discard."""
+    options = _estimated_cover_options(open_time=12.76, close_time=12.23)
+    entry = await async_setup_integration(hass, MockBridge, options=options)
+    result = await _async_start_cover_options(hass, entry)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"next_step_id": "manual_timing"}
+    )
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"],
+        {
+            CONF_DEVICE_CLASS: "blind",
+            CONF_OPEN_TRAVEL_SECONDS: 12.5,
+            CONF_CLOSE_TRAVEL_SECONDS: 12.0,
+            CONF_OPEN_GUARD_SECONDS: 0.8,
+            CONF_CLOSE_GUARD_SECONDS: 0.9,
+        },
+    )
+
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"next_step_id": "back_to_covers"}
+    )
+    assert result["step_id"] == "discard_changes"
+    assert entry.options == options
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"next_step_id": "zone"}
+    )
+    assert result["description_placeholders"]["status"] == "pending changes"
+
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"next_step_id": "back_to_covers"}
+    )
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"next_step_id": "discard_changes"}
+    )
+
+    assert result["step_id"] == "configure"
+    assert entry.options == options
+
+
 async def test_advanced_mapping_options_flow(hass: HomeAssistant) -> None:
     """Add an explicit keypad button, gesture, and effect mapping."""
     options = {
@@ -827,22 +932,124 @@ async def test_advanced_mapping_options_flow(hass: HomeAssistant) -> None:
     }
 
 
+@pytest.mark.parametrize(
+    ("bridge_class", "expected_gestures"),
+    [
+        (MockBridge, [ACTION_PRESS, ACTION_RELEASE, ACTION_MULTITAP]),
+        (
+            HomeWorksQSXMockBridge,
+            [ACTION_PRESS, ACTION_RELEASE, ACTION_MULTITAP, ACTION_LONG_PRESS],
+        ),
+    ],
+    ids=("generic-processor", "homeworks-qsx"),
+)
+async def test_advanced_gesture_choices_match_processor_capability(
+    hass: HomeAssistant,
+    bridge_class: type[MockBridge],
+    expected_gestures: list[str],
+) -> None:
+    """Offer long-press only where the processor exposes native LongHold."""
+    entry = await async_setup_integration(
+        hass, bridge_class, options=_estimated_cover_options()
+    )
+    result = await _async_start_cover_options(hass, entry)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"next_step_id": "advanced_mappings"}
+    )
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"next_step_id": "advanced_add"}
+    )
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"keypad_serial": "66286451"}
+    )
+
+    assert result["data_schema"].schema["gesture"].config["options"] == (
+        expected_gestures
+    )
+
+
+async def test_advanced_mapping_edit_remove_and_duplicate_rejection(
+    hass: HomeAssistant,
+) -> None:
+    """Edit and remove a mapping while rejecting a duplicate event key."""
+    binding = {
+        "keypad_serial": "66286451",
+        "leap_button_number": 3,
+        "button_type": "Kitchen Pendants",
+        "gesture": ACTION_MULTITAP,
+        "effect": ExternalAction.OPEN,
+    }
+    options = _estimated_cover_options(bindings=[binding])
+    entry = await async_setup_integration(hass, MockBridge, options=options)
+
+    result = await _async_start_cover_options(hass, entry)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"next_step_id": "advanced_mappings"}
+    )
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"next_step_id": "advanced_add"}
+    )
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"keypad_serial": "66286451"}
+    )
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"],
+        {
+            ATTR_LEAP_BUTTON_NUMBER: "3",
+            "gesture": ACTION_MULTITAP,
+            "effect": ExternalAction.CLOSE,
+        },
+    )
+    assert result["step_id"] == "advanced_binding"
+    assert result["errors"] == {"base": "binding_already_assigned"}
+    assert entry.options == options
+    hass.config_entries.options.async_abort(result["flow_id"])
+
+    result = await _async_start_cover_options(hass, entry)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"next_step_id": "advanced_mappings"}
+    )
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"next_step_id": "advanced_edit"}
+    )
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"binding": "0"}
+    )
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"],
+        {
+            ATTR_LEAP_BUTTON_NUMBER: "3",
+            "gesture": ACTION_MULTITAP,
+            "effect": ExternalAction.CLOSE,
+        },
+    )
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"next_step_id": "zone"}
+    )
+    assert "close" in result["description_placeholders"]["bindings"]
+
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"next_step_id": "advanced_mappings"}
+    )
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"next_step_id": "advanced_remove"}
+    )
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"binding": "0"}
+    )
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"next_step_id": "zone"}
+    )
+    result = await _async_finish_cover_options(hass, result)
+
+    assert result["data"][CONF_ESTIMATED_COVERS]["805"][CONF_BINDINGS] == []
+
+
 async def test_standard_pico_requires_physical_verification(
     hass: HomeAssistant,
 ) -> None:
     """Verify every proposed standard action before saving a new Pico."""
-    options = {
-        CONF_ESTIMATED_COVERS: {
-            "805": {
-                CONF_DEVICE_CLASS: "blind",
-                CONF_OPEN_TRAVEL_SECONDS: 9.8,
-                CONF_CLOSE_TRAVEL_SECONDS: 9.3,
-                CONF_OPEN_GUARD_SECONDS: 1.0,
-                CONF_CLOSE_GUARD_SECONDS: 1.0,
-                CONF_BINDINGS: [],
-            }
-        }
-    }
+    options = _estimated_cover_options()
     entry = await async_setup_integration(hass, MockBridge, options=options)
     session = AsyncMock()
     events = {
@@ -889,6 +1096,61 @@ async def test_standard_pico_requires_physical_verification(
         (1, "stop"),
     ]
     assert session.async_capture_action.await_count == 3
+
+
+async def test_standard_pico_cancel_after_partial_verification(
+    hass: HomeAssistant,
+) -> None:
+    """Discard an entire proposed standard Pico after one verified action."""
+    options = _estimated_cover_options()
+    entry = await async_setup_integration(hass, MockBridge, options=options)
+    bridge = entry.runtime_data.bridge
+    bridge.stop_cover = AsyncMock()
+    result = await _async_start_cover_options(hass, entry)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"next_step_id": "standard_picos"}
+    )
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"next_step_id": "standard_picos_edit"}
+    )
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {CONF_STANDARD_PICOS: ["68551522"]}
+    )
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"next_step_id": "verify_binding_begin"}
+    )
+    hass.bus.async_fire(
+        LUTRON_CASETA_BUTTON_EVENT,
+        {
+            ATTR_SERIAL: "68551522",
+            ATTR_LEAP_BUTTON_NUMBER: 3,
+            ATTR_BUTTON_TYPE: "raise",
+            ATTR_ACTION: ACTION_PRESS,
+        },
+    )
+    bridge.call_zone_status_subscribers(
+        ZoneStatusEvent(
+            "805",
+            "805",
+            {"Zone": {"href": "/zone/805"}},
+            ZoneStatusEventOrigin.UPDATE,
+        )
+    )
+    result = await _async_resolve_progress(hass, result)
+    assert result["step_id"] == "verify_binding"
+    assert result["description_placeholders"]["action"] is ExternalAction.CLOSE
+
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"next_step_id": "standard_picos_cancel"}
+    )
+
+    assert result["step_id"] == "standard_picos"
+    assert entry.options == options
+    assert (
+        entry.runtime_data.open_close_stop_manager.diagnostics()["setup_session"]
+        is None
+    )
+    bridge.stop_cover.assert_awaited_once_with("805")
 
 
 async def test_new_cover_verifies_standard_pico_before_offering_calibration(
@@ -1102,18 +1364,7 @@ async def test_relearn_detects_existing_action_before_save(
 ) -> None:
     """Recognize canonical mappings before offering a duplicate Save action."""
     open_binding = standard_pico_bindings(["68551522"])[0]
-    options = {
-        CONF_ESTIMATED_COVERS: {
-            "805": {
-                CONF_DEVICE_CLASS: "blind",
-                CONF_OPEN_TRAVEL_SECONDS: 9.8,
-                CONF_CLOSE_TRAVEL_SECONDS: 9.3,
-                CONF_OPEN_GUARD_SECONDS: 1.0,
-                CONF_CLOSE_GUARD_SECONDS: 1.0,
-                CONF_BINDINGS: [open_binding.as_dict()],
-            }
-        }
-    }
+    options = _estimated_cover_options(bindings=[open_binding.as_dict()])
     entry = await async_setup_integration(hass, MockBridge, options=options)
     session = AsyncMock()
     session.async_capture_action.return_value = (
@@ -1137,6 +1388,45 @@ async def test_relearn_detects_existing_action_before_save(
     assert result["type"] is FlowResultType.MENU
     assert result["step_id"] == expected_step
     assert entry.options == options
+
+
+async def test_learn_stop_replaces_conflicting_action_after_confirmation(
+    hass: HomeAssistant,
+) -> None:
+    """Replace an existing effect only after the explicit Learn confirmation."""
+    open_binding = standard_pico_bindings(["68551522"])[0]
+    options = _estimated_cover_options(bindings=[open_binding.as_dict()])
+    entry = await async_setup_integration(hass, MockBridge, options=options)
+    session = AsyncMock()
+    session.async_capture_action.return_value = (
+        SetupButtonEvent("68551522", 3, "raise", ACTION_PRESS, 1.0),
+    )
+    result = await _async_start_cover_options(hass, entry)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"next_step_id": "learn_action"}
+    )
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"next_step_id": "learn_stop"}
+    )
+    manager = entry.runtime_data.open_close_stop_manager
+    with patch.object(manager, "async_begin_setup", AsyncMock(return_value=session)):
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], {"next_step_id": "learn_begin"}
+        )
+        result = await _async_resolve_progress(hass, result)
+
+    assert result["step_id"] == "learn_conflict"
+    assert entry.options == options
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"next_step_id": "learn_replace"}
+    )
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"next_step_id": "zone"}
+    )
+    result = await _async_finish_cover_options(hass, result)
+
+    binding = result["data"][CONF_ESTIMATED_COVERS]["805"][CONF_BINDINGS][0]
+    assert binding["effect"] == ExternalAction.STOP
 
 
 async def test_guided_home_assistant_calibration_options_flow(
@@ -1248,6 +1538,44 @@ async def test_guided_home_assistant_calibration_options_flow(
         "open_samples": [9.8, 9.9],
         "close_samples": [9.3, 9.2],
     }
+
+
+@pytest.mark.parametrize(
+    ("open_time", "close_time"),
+    [(12.76, 12.23), (12.45, 12.21)],
+    ids=("sofia", "giulia"),
+)
+async def test_existing_cover_abort_during_calibration_stops_and_discards(
+    hass: HomeAssistant, open_time: float, close_time: float
+) -> None:
+    """Safety-Stop an interrupted edit without changing saved cover options."""
+    options = _estimated_cover_options(open_time=open_time, close_time=close_time)
+    entry = await async_setup_integration(hass, MockBridge, options=options)
+    bridge = entry.runtime_data.bridge
+    bridge.lower_cover = AsyncMock()
+    bridge.stop_cover = AsyncMock()
+    result = await _async_start_cover_options(hass, entry)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"next_step_id": "calibrate"}
+    )
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"next_step_id": "calibrate_ha"}
+    )
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"next_step_id": "calibration_ha_begin"}
+    )
+    assert result["step_id"] == "calibration_ha_finish"
+
+    hass.config_entries.options.async_abort(result["flow_id"])
+    await hass.async_block_till_done()
+
+    bridge.lower_cover.assert_awaited_once_with("805")
+    bridge.stop_cover.assert_awaited_once_with("805")
+    assert entry.options == options
+    assert (
+        entry.runtime_data.open_close_stop_manager.diagnostics()["setup_session"]
+        is None
+    )
 
 
 async def test_new_cover_guided_calibration_advances_to_final_review(

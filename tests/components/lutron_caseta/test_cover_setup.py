@@ -9,6 +9,10 @@ import pytest
 
 from homeassistant.components.cover import CoverDeviceClass
 from homeassistant.components.lutron_caseta.const import (
+    ACTION_LONG_PRESS,
+    ACTION_MULTITAP,
+    ACTION_PRESS,
+    ACTION_RELEASE,
     ATTR_ACTION,
     ATTR_BUTTON_TYPE,
     ATTR_LEAP_BUTTON_NUMBER,
@@ -32,6 +36,7 @@ from homeassistant.components.lutron_caseta.cover_setup import (
 from homeassistant.components.lutron_caseta.estimated_cover import (
     EstimatedCoverConfig,
     OpenCloseStopManager,
+    PicoBinding,
 )
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
@@ -331,6 +336,39 @@ async def test_pico_calibration_measures_without_duplicate_commands(
     stop_cover.assert_not_awaited()
 
 
+async def test_repeated_pico_stop_does_not_complete_next_measurement(
+    setup_session,
+) -> None:
+    """Discard an extra Stop before the next calibration leg starts."""
+    session, fake_time, _, _, stop_cover = setup_session
+    direction = {("69990001", 3, ACTION_PRESS)}
+    stops = {("69990001", 1, ACTION_PRESS)}
+    measurement = asyncio.create_task(
+        session.async_measure_pico_movement(direction, stops)
+    )
+    await asyncio.sleep(0)
+    session.receive_button(SetupButtonEvent("69990001", 3, "raise", ACTION_PRESS, 0.0))
+    await fake_time.advance(0.1)
+    session.receive_zone_update(initial=False)
+    await fake_time.advance(0.1)
+    await fake_time.advance(9.6)
+    stop_event = SetupButtonEvent("69990001", 1, "stop", ACTION_PRESS, fake_time.now)
+    session.receive_button(stop_event)
+    session.receive_button(stop_event)
+
+    assert await measurement == pytest.approx(9.8)
+
+    next_measurement = asyncio.create_task(
+        session.async_measure_pico_movement(direction, stops, timeout=1)
+    )
+    await _advance_until_done(fake_time, next_measurement, step=0.5)
+
+    with pytest.raises(SetupCaptureTimeout) as err:
+        await next_measurement
+    assert err.value.reason is SetupCaptureFailureReason.DIRECTION_NOT_DETECTED
+    stop_cover.assert_not_awaited()
+
+
 async def test_pico_calibration_reports_missing_direction(setup_session) -> None:
     """Classify a calibration timeout before any mapped direction arrives."""
     session, fake_time, _, _, stop_cover = setup_session
@@ -440,6 +478,57 @@ async def test_manager_exclusively_routes_setup_events(hass: HomeAssistant) -> N
     manager.ensure_commands_allowed("805")
 
     remove_engine()
+    await manager.async_shutdown()
+
+
+async def test_manager_routes_every_supported_gesture(hass: HomeAssistant) -> None:
+    """Route press, release, multi-tap, and long-press bindings by stable key."""
+    bindings = tuple(
+        PicoBinding("69990001", button, button_type, gesture, effect)
+        for button, button_type, gesture, effect in (
+            (1, "stop", ACTION_PRESS, ExternalAction.STOP),
+            (2, "favorite", ACTION_RELEASE, ExternalAction.OPEN),
+            (3, "raise", ACTION_MULTITAP, ExternalAction.CLOSE),
+            (4, "lower", ACTION_LONG_PRESS, ExternalAction.OPEN),
+        )
+    )
+    bridge = MockBridge()
+    manager = OpenCloseStopManager(
+        hass,
+        bridge,
+        {
+            "805": EstimatedCoverConfig(
+                "805", CoverDeviceClass.BLIND, TravelTimes(9.8, 9.3, 1, 1), bindings
+            )
+        },
+    )
+    engine = AsyncMock()
+    manager.register_engine("805", engine)
+
+    for binding in bindings:
+        hass.bus.async_fire(
+            LUTRON_CASETA_BUTTON_EVENT,
+            {
+                ATTR_SERIAL: binding.keypad_serial,
+                ATTR_LEAP_BUTTON_NUMBER: binding.leap_button_number,
+                ATTR_BUTTON_TYPE: binding.button_type,
+                ATTR_ACTION: binding.gesture,
+            },
+        )
+    hass.bus.async_fire(
+        LUTRON_CASETA_BUTTON_EVENT,
+        {
+            ATTR_SERIAL: "69990001",
+            ATTR_LEAP_BUTTON_NUMBER: 4,
+            ATTR_BUTTON_TYPE: "lower",
+            ATTR_ACTION: ACTION_PRESS,
+        },
+    )
+    await hass.async_block_till_done()
+
+    assert [call.args[0] for call in engine.async_external_action.await_args_list] == [
+        binding.effect for binding in bindings
+    ]
     await manager.async_shutdown()
 
 
