@@ -39,9 +39,9 @@ class LutronCasetaOpenCloseStopCover(LutronCasetaEntity, CoverEntity):
         CoverEntityFeature.OPEN | CoverEntityFeature.CLOSE | CoverEntityFeature.STOP
     )
 
-    def __init__(self, device, data) -> None:
+    def __init__(self, hass, device, data) -> None:
         """Initialize command routing and setup ownership checks."""
-        super().__init__(device, data)
+        super().__init__(hass, device, data)
         self._manager = data.open_close_stop_manager
         self._zone_id = str(device["zone"])
 
@@ -75,9 +75,9 @@ class LutronCasetaEstimatedOpenCloseStopCover(LutronCasetaEntity, CoverEntity):
         | CoverEntityFeature.SET_POSITION
     )
 
-    def __init__(self, device, data, config: EstimatedCoverConfig) -> None:
+    def __init__(self, hass, device, data, config: EstimatedCoverConfig) -> None:
         """Initialize the entity and its timing engine."""
-        super().__init__(device, data)
+        super().__init__(hass, device, data)
         self._attr_device_class = config.device_class
         self._manager = data.open_close_stop_manager
         self._zone_id = config.zone_id
@@ -321,7 +321,9 @@ async def async_setup_entry(
             )
         ):
             entities.append(
-                LutronCasetaEstimatedOpenCloseStopCover(cover_device, data, config)
+                LutronCasetaEstimatedOpenCloseStopCover(
+                    hass, cover_device, data, config
+                )
             )
             continue
 
@@ -329,6 +331,6 @@ async def async_setup_entry(
         entity_class = PYLUTRON_TYPE_TO_CLASSES.get(
             cover_device["type"], LutronCasetaShade
         )
-        entities.append(entity_class(cover_device, data))
+        entities.append(entity_class(hass, cover_device, data))
 
     async_add_entities(entities)

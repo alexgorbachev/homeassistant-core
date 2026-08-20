@@ -22,6 +22,7 @@ class LutronCasetaData:
     bridge: Smartbridge
     bridge_device: dict[str, Any]
     keypad_data: LutronKeypadData
+    config_entry_id: str
     open_close_stop_manager: OpenCloseStopManager
     estimated_cover_draft_store: EstimatedCoverDraftStore
 
